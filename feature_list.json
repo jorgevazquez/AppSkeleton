@@ -1,0 +1,1854 @@
+[
+  {
+    "id": 1,
+    "category": "functional",
+    "priority": 1,
+    "description": "Core error taxonomy and Result-style types for the kernel",
+    "steps": [
+      "Define a base AppError class plus specific subclasses (ValidationError, ConfigError, PluginLoadError, CapabilityDeniedError)",
+      "Write unit tests asserting each error carries a stable machine-readable code and safe (non-leaking) public message",
+      "Verify errors serialize to a JSON shape suitable for API error envelopes without including stack traces by default"
+    ],
+    "depends_on": [],
+    "passes": false
+  },
+  {
+    "id": 2,
+    "category": "functional",
+    "priority": 1,
+    "description": "Layered configuration system (defaults -> env -> operator overrides) validated with zod",
+    "steps": [
+      "Implement a config loader that merges default config, process.env, and an optional local override file",
+      "Define a zod schema for core config (port, log level, node env)",
+      "Write unit tests: missing required var fails fast with a clear error; valid config loads correctly; overrides take precedence in the right order"
+    ],
+    "depends_on": [],
+    "passes": false
+  },
+  {
+    "id": 3,
+    "category": "functional",
+    "priority": 1,
+    "description": "Structured logger with automatic secret redaction",
+    "steps": [
+      "Wrap pino to produce structured JSON logs with request/plugin context fields",
+      "Implement a redaction list (password, secret, token, apikey, authorization) applied before any log line is emitted",
+      "Write unit tests proving a log call containing a secret-like field never appears in the emitted output"
+    ],
+    "depends_on": [],
+    "passes": false
+  },
+  {
+    "id": 4,
+    "category": "functional",
+    "priority": 2,
+    "description": "Plugin manifest schema (plugin.json) and zod validator",
+    "steps": [
+      "Define the manifest shape: id, version (semver), depends_on (semver ranges), capabilities.provides, capabilities.requires, entry point",
+      "Implement a zod schema and a validateManifest() function returning typed errors for every violation",
+      "Write unit tests covering valid manifests and at least 5 invalid variants (bad semver, missing id, duplicate capability, malformed capability grammar, unknown field)"
+    ],
+    "depends_on": [
+      1,
+      2
+    ],
+    "passes": false
+  },
+  {
+    "id": 5,
+    "category": "functional",
+    "priority": 2,
+    "description": "Plugin directory discovery and scanning",
+    "steps": [
+      "Implement a scanner that walks src/plugins/*, reads each plugin.json, and returns raw manifest + directory path pairs",
+      "Skip and log (do not crash on) directories missing a plugin.json",
+      "Write unit tests against a temp fixture directory tree with valid, missing-manifest, and malformed-manifest plugins"
+    ],
+    "depends_on": [
+      4
+    ],
+    "passes": false
+  },
+  {
+    "id": 6,
+    "category": "functional",
+    "priority": 3,
+    "description": "Dependency graph resolution: topological sort, semver range checks, cycle detection",
+    "steps": [
+      "Build a dependency graph from discovered manifests using depends_on semver ranges",
+      "Implement topological sort producing a deterministic load order",
+      "Detect and reject circular dependencies with a clear error naming the cycle",
+      "Write unit tests: linear chain, diamond dependency, missing dependency, version range mismatch, and a 3-node cycle"
+    ],
+    "depends_on": [
+      5
+    ],
+    "passes": false
+  },
+  {
+    "id": 7,
+    "category": "functional",
+    "priority": 3,
+    "description": "Capability broker: declare, grant, and revoke inter-plugin capabilities",
+    "steps": [
+      "Implement a broker where a plugin can only obtain a capability handle it declared in capabilities.requires and that is registered by a provider",
+      "Ensure there is no ambient/global way to reach another plugin's internals outside the broker",
+      "Write unit tests: granted capability is usable, undeclared capability request is denied, revoked capability stops working immediately"
+    ],
+    "depends_on": [
+      1,
+      2
+    ],
+    "passes": false
+  },
+  {
+    "id": 8,
+    "category": "functional",
+    "priority": 4,
+    "description": "Plugin loader: instantiate plugins in dependency order and run lifecycle hooks",
+    "steps": [
+      "Implement loader that, given the sorted graph, calls onInstall/onEnable in order, wiring each plugin's granted capabilities via the broker",
+      "Support onDisable/onUninstall in reverse dependency order",
+      "Write unit tests with fixture plugins asserting hook call order matches the dependency graph"
+    ],
+    "depends_on": [
+      6,
+      7
+    ],
+    "passes": false
+  },
+  {
+    "id": 9,
+    "category": "functional",
+    "priority": 4,
+    "description": "Typed event bus for cross-plugin publish/subscribe",
+    "steps": [
+      "Implement an event bus with typed event names and payloads (no `any`), supporting multiple subscribers per event",
+      "Ensure a throwing subscriber cannot prevent other subscribers of the same event from running",
+      "Write unit tests: multiple subscribers, unsubscribe, and isolation from a throwing handler"
+    ],
+    "depends_on": [
+      1
+    ],
+    "passes": false
+  },
+  {
+    "id": 10,
+    "category": "functional",
+    "priority": 5,
+    "description": "Error isolation: a failing plugin cannot crash the kernel or unrelated plugins",
+    "steps": [
+      "Wrap plugin load and lifecycle hook execution in try/catch that logs and marks only that plugin as failed",
+      "Ensure a failed plugin's failure does not prevent independent plugins (no depends_on relationship) from loading",
+      "Write unit tests: a plugin that throws in onEnable results in only that plugin (and its dependents) being marked failed"
+    ],
+    "depends_on": [
+      8
+    ],
+    "passes": false
+  },
+  {
+    "id": 11,
+    "category": "functional",
+    "priority": 5,
+    "description": "In-memory audit trail sink for capability grants and permission checks",
+    "steps": [
+      "Define an AuditSink interface (record(event)) and a default in-memory implementation with a query API",
+      "Wire the capability broker to record every grant/deny decision to the audit sink",
+      "Write unit tests asserting grants, denials, and revocations all produce audit entries with actor/target/outcome/timestamp"
+    ],
+    "depends_on": [
+      3,
+      7
+    ],
+    "passes": false
+  },
+  {
+    "id": 12,
+    "category": "functional",
+    "priority": 6,
+    "description": "Kernel bootstrap: wire config, logger, registry, loader, event bus, and audit sink together in src/server/index.ts",
+    "steps": [
+      "Replace the placeholder bootstrap with real kernel construction: load config, build logger, discover plugins, resolve dependencies, load in order",
+      "Ensure a fatal config or manifest error produces a clear, single, non-stack-trace startup error message and a non-zero exit code",
+      "Run npm run dev and confirm the process boots cleanly with zero plugins present, then again after later plugins exist"
+    ],
+    "depends_on": [
+      8,
+      9,
+      10
+    ],
+    "passes": false
+  },
+  {
+    "id": 13,
+    "category": "functional",
+    "priority": 6,
+    "description": "Kernel introspection API: report loaded plugins, their capabilities, and load status",
+    "steps": [
+      "Implement a programmatic kernel.introspect() returning plugin id, version, status (loaded/failed/disabled), and granted capabilities",
+      "Write a small CLI script (or npm script) that prints this report in human-readable form",
+      "Write unit tests asserting the report reflects load failures and disabled plugins accurately"
+    ],
+    "depends_on": [
+      12
+    ],
+    "passes": false
+  },
+  {
+    "id": 14,
+    "category": "integration",
+    "priority": 7,
+    "description": "Kernel unit/integration test suite covering registry, loader, broker, and error isolation together",
+    "steps": [
+      "Write an integration test that loads a fixture set of 4-5 plugins with a realistic dependency graph end-to-end through the real bootstrap path",
+      "Include a case with one intentionally broken plugin and assert the rest still load",
+      "Run npm test and confirm the whole kernel suite is green"
+    ],
+    "depends_on": [
+      8,
+      10
+    ],
+    "passes": false
+  },
+  {
+    "id": 15,
+    "category": "functional",
+    "priority": 7,
+    "description": "Written plugin conventions spec: naming rules, capability grammar (resource:action), forbidden cross-plugin imports",
+    "steps": [
+      "Write docs/plugin-conventions.md documenting the manifest shape, capability naming grammar, directory layout, and import rules",
+      "Cross-check the doc against the actual zod schema so they cannot silently drift (a shared constant or generated snippet)",
+      "Have at least one existing kernel test assert the documented capability grammar regex matches the validator's actual regex"
+    ],
+    "depends_on": [
+      4
+    ],
+    "passes": false
+  },
+  {
+    "id": 16,
+    "category": "functional",
+    "priority": 8,
+    "description": "Runtime plugin enable/disable without a full process restart",
+    "steps": [
+      "Implement kernel.disablePlugin(id) / enablePlugin(id) that run the appropriate lifecycle hooks and update introspection status",
+      "Ensure disabling a plugin that others depend on is rejected with a clear error listing the dependents",
+      "Write unit tests: disable/re-enable a leaf plugin succeeds; disabling a depended-upon plugin is rejected"
+    ],
+    "depends_on": [
+      8,
+      13
+    ],
+    "passes": false
+  },
+  {
+    "id": 17,
+    "category": "functional",
+    "priority": 4,
+    "description": "database-mysql plugin manifest declaring db:query, db:transaction, db:migrate capabilities",
+    "steps": [
+      "Create src/plugins/database-mysql/plugin.json following the conventions from feature 15",
+      "Validate the manifest passes the kernel's manifest validator",
+      "Write a unit test asserting the plugin is discoverable and its manifest is valid"
+    ],
+    "depends_on": [
+      4,
+      6
+    ],
+    "passes": false
+  },
+  {
+    "id": 18,
+    "category": "functional",
+    "priority": 5,
+    "description": "MySQL connection pool with validated config and optional TLS",
+    "steps": [
+      "Implement pool construction from DB_* env vars via the zod config schema, using mysql2's promise pool",
+      "Fail fast at startup with a clear error if required DB config is missing or malformed",
+      "Write unit tests for config validation; write an integration test that connects to the docker-compose MySQL instance"
+    ],
+    "depends_on": [
+      17,
+      2
+    ],
+    "passes": false
+  },
+  {
+    "id": 19,
+    "category": "functional",
+    "priority": 6,
+    "description": "Migration runner: versioned, checksum-verified, up/down, tracked in a migrations table",
+    "steps": [
+      "Implement a migrations table (id, name, checksum, applied_at) and a runner that applies pending migrations in order",
+      "Detect and reject a modified already-applied migration file via checksum mismatch",
+      "Implement `npm run migrate` and `npm run migrate:down`; write an integration test applying and rolling back a sample migration"
+    ],
+    "depends_on": [
+      18
+    ],
+    "passes": false
+  },
+  {
+    "id": 20,
+    "category": "functional",
+    "priority": 6,
+    "description": "db:query capability implemented via kysely, parameterized only",
+    "steps": [
+      "Wire a kysely Kysely<Database> instance over the mysql2 pool and expose a typed db:query capability",
+      "Ensure there is no code path that accepts raw interpolated SQL strings from capability consumers",
+      "Write an integration test performing a parameterized SELECT/INSERT and asserting SQL injection payloads are treated as literal data"
+    ],
+    "depends_on": [
+      18
+    ],
+    "passes": false
+  },
+  {
+    "id": 21,
+    "category": "functional",
+    "priority": 7,
+    "description": "db:transaction capability with commit/rollback semantics",
+    "steps": [
+      "Expose a transaction(fn) capability that commits on success and rolls back on any thrown error",
+      "Write an integration test: a transaction with a failing statement midway leaves no partial writes"
+    ],
+    "depends_on": [
+      20
+    ],
+    "passes": false
+  },
+  {
+    "id": 22,
+    "category": "functional",
+    "priority": 7,
+    "description": "Per-plugin schema/table namespace enforcement",
+    "steps": [
+      "Define and document a table naming convention (e.g. `<plugin_id>_<table>`) and enforce it in the migration runner",
+      "Reject a migration that creates a table violating another plugin's namespace",
+      "Write a unit test asserting a misnamed table migration is rejected with a clear error"
+    ],
+    "depends_on": [
+      19
+    ],
+    "passes": false
+  },
+  {
+    "id": 23,
+    "category": "functional",
+    "priority": 8,
+    "description": "Connection resilience: retry with backoff and pool exhaustion handling",
+    "steps": [
+      "Implement exponential backoff retry for transient connection errors on startup and mid-session",
+      "Return a clear, safe error (not a raw driver exception) to capability consumers when the pool is exhausted",
+      "Write a test simulating a temporarily unreachable DB and asserting the retry/backoff behavior"
+    ],
+    "depends_on": [
+      18
+    ],
+    "passes": false
+  },
+  {
+    "id": 24,
+    "category": "integration",
+    "priority": 8,
+    "description": "Database health check integrated into kernel introspection",
+    "steps": [
+      "Expose a health-check function on the db:query capability that runs a trivial SELECT 1",
+      "Wire it into the kernel introspection report from feature 13 as a per-plugin health field",
+      "Write a test asserting introspection reports 'unhealthy' when the DB is unreachable"
+    ],
+    "depends_on": [
+      20,
+      13
+    ],
+    "passes": false
+  },
+  {
+    "id": 25,
+    "category": "functional",
+    "priority": 9,
+    "description": "Seed data / fixtures mechanism for local development",
+    "steps": [
+      "Implement a seed runner separate from migrations (idempotent, dev-only) that other plugins can register seed functions with",
+      "Wire it into init.sh behind an explicit flag so production runs never seed automatically",
+      "Write a test asserting seeds are idempotent (running twice does not duplicate rows)"
+    ],
+    "depends_on": [
+      19
+    ],
+    "passes": false
+  },
+  {
+    "id": 26,
+    "category": "performance",
+    "priority": 10,
+    "description": "Slow query logging and basic query performance metrics",
+    "steps": [
+      "Instrument the db:query capability to log queries exceeding a configurable duration threshold, with parameters redacted",
+      "Track basic counters (query count, error count, average duration) queryable via kernel introspection",
+      "Write a test asserting a deliberately slow query is logged and counted"
+    ],
+    "depends_on": [
+      20
+    ],
+    "passes": false
+  },
+  {
+    "id": 27,
+    "category": "integration",
+    "priority": 9,
+    "description": "Integration test suite for database-mysql against dockerized MySQL",
+    "steps": [
+      "Cover migrations up/down, db:query CRUD, db:transaction rollback, and namespace enforcement in one suite that runs against docker-compose MySQL",
+      "Wire this suite to run in CI (depends on the CI pipeline feature) with a MySQL service container",
+      "Run npm test locally with docker-compose mysql up and confirm all pass"
+    ],
+    "depends_on": [
+      19,
+      20,
+      21
+    ],
+    "passes": false
+  },
+  {
+    "id": 28,
+    "category": "functional",
+    "priority": 14,
+    "description": "Backup and restore helper scripts",
+    "steps": [
+      "Write a mysqldump-based backup script and a matching restore script, parameterized by env config",
+      "Document usage in docs/backup-restore.md",
+      "Write a test (can be a shell-invoking integration test) that backs up and restores a small dataset and asserts row-for-row equality"
+    ],
+    "depends_on": [
+      19
+    ],
+    "passes": false
+  },
+  {
+    "id": 29,
+    "category": "functional",
+    "priority": 11,
+    "description": "Persist the kernel audit trail into MySQL once the database plugin is available",
+    "steps": [
+      "Add an audit_log migration under the database-mysql namespace convention",
+      "Implement a MySQL-backed AuditSink and swap it in during bootstrap once database-mysql has loaded, falling back to in-memory if the DB plugin is disabled",
+      "Write an integration test asserting audit events recorded during a session are queryable from the database after restart"
+    ],
+    "depends_on": [
+      11,
+      20,
+      22
+    ],
+    "passes": false
+  },
+  {
+    "id": 30,
+    "category": "performance",
+    "priority": 12,
+    "description": "Expose connection pool metrics (active/idle/queued) via kernel introspection",
+    "steps": [
+      "Add pool metrics collection to the connection pool wrapper",
+      "Surface them through the health-check/introspection integration from feature 24",
+      "Write a test asserting metrics update correctly under concurrent queries"
+    ],
+    "depends_on": [
+      23,
+      24
+    ],
+    "passes": false
+  },
+  {
+    "id": 31,
+    "category": "functional",
+    "priority": 5,
+    "description": "rbac plugin manifest declaring rbac:check and rbac:manage capabilities",
+    "steps": [
+      "Create src/plugins/rbac/plugin.json following conventions from feature 15",
+      "Validate the manifest against the kernel's validator",
+      "Write a unit test asserting the plugin is discoverable and valid"
+    ],
+    "depends_on": [
+      4,
+      6
+    ],
+    "passes": false
+  },
+  {
+    "id": 32,
+    "category": "functional",
+    "priority": 6,
+    "description": "Core RBAC data model: roles, permissions (resource:action grammar), role-permission and user-role associations",
+    "steps": [
+      "Design in-memory types/interfaces for Role, Permission, and the association tables ahead of persistence",
+      "Implement a permission-string parser/validator enforcing the resource:action grammar from feature 15",
+      "Write unit tests for the parser covering valid and invalid permission strings"
+    ],
+    "depends_on": [
+      31
+    ],
+    "passes": false
+  },
+  {
+    "id": 33,
+    "category": "functional",
+    "priority": 7,
+    "description": "Policy evaluation engine: can(user, action, resource)",
+    "steps": [
+      "Implement can() resolving a user's roles to permissions and evaluating against the requested action/resource, deny-by-default",
+      "Support wildcard permissions (e.g. wiki:* ) with explicit, documented precedence rules",
+      "Write unit tests covering allow, deny-by-default, wildcard match, and conflicting-role scenarios"
+    ],
+    "depends_on": [
+      32
+    ],
+    "passes": false
+  },
+  {
+    "id": 34,
+    "category": "functional",
+    "priority": 9,
+    "description": "Persistent storage for roles, permissions, and assignments via database-mysql",
+    "steps": [
+      "Add roles/permissions/role_permissions/user_roles migrations under the rbac_ table namespace",
+      "Reimplement the data access layer to read/write through the db:query capability instead of in-memory structures",
+      "Write an integration test: create a role, assign a permission, assign to a user, restart, and confirm state persisted"
+    ],
+    "depends_on": [
+      19,
+      20,
+      32
+    ],
+    "passes": false
+  },
+  {
+    "id": 35,
+    "category": "performance",
+    "priority": 10,
+    "description": "Policy decision caching with invalidation on role/permission change",
+    "steps": [
+      "Add an in-process cache for can() results keyed by (user, action, resource) with a short TTL",
+      "Invalidate affected cache entries immediately on any role/permission/assignment mutation",
+      "Write a test proving a permission revoked mid-session is denied on the very next check, not after the TTL"
+    ],
+    "depends_on": [
+      33,
+      34
+    ],
+    "passes": false
+  },
+  {
+    "id": 36,
+    "category": "functional",
+    "priority": 8,
+    "description": "Role and permission management operations (create/update/delete role, assign/revoke permission and role)",
+    "steps": [
+      "Implement the management operations as a typed programmatic API ahead of any HTTP surface",
+      "Enforce that only callers already holding rbac:manage may invoke them (self-referential check)",
+      "Write unit tests for each operation including failure paths (duplicate role name, assigning a nonexistent permission)"
+    ],
+    "depends_on": [
+      33,
+      34
+    ],
+    "passes": false
+  },
+  {
+    "id": 37,
+    "category": "functional",
+    "priority": 9,
+    "description": "Seed default roles and permissions (admin, editor, viewer)",
+    "steps": [
+      "Register a seed (via the seed mechanism from feature 25) creating admin/editor/viewer roles with a sensible starter permission set",
+      "Ensure the seed is idempotent",
+      "Write a test asserting seeding twice does not create duplicate roles"
+    ],
+    "depends_on": [
+      34,
+      36
+    ],
+    "passes": false
+  },
+  {
+    "id": 38,
+    "category": "functional",
+    "priority": 9,
+    "description": "Audit logging of every access-check decision",
+    "steps": [
+      "Wire can() to record allow/deny decisions to the kernel audit trail with user, action, resource, and outcome",
+      "Ensure high-frequency checks do not overwhelm the audit sink (batch or sample if needed, documented tradeoff)",
+      "Write a test asserting a denied check produces a queryable audit entry"
+    ],
+    "depends_on": [
+      11,
+      33
+    ],
+    "passes": false
+  },
+  {
+    "id": 39,
+    "category": "functional",
+    "priority": 8,
+    "description": "Expose rbac:check as a consumable capability for other plugins",
+    "steps": [
+      "Register the can() function as the rbac:check capability through the broker",
+      "Write a fixture consumer plugin that requests rbac:check and uses it, proving the cross-plugin contract works",
+      "Write an integration test for the fixture consumer"
+    ],
+    "depends_on": [
+      33
+    ],
+    "passes": false
+  },
+  {
+    "id": 40,
+    "category": "functional",
+    "priority": 10,
+    "description": "Bootstrap-admin safety mechanism to prevent permanent lockout",
+    "steps": [
+      "On first run with zero users holding the admin role, provision a bootstrap admin account/token and log it prominently once",
+      "Ensure the bootstrap path is disabled automatically once at least one admin exists",
+      "Write a test simulating first-run vs. already-provisioned states"
+    ],
+    "depends_on": [
+      37
+    ],
+    "passes": false
+  },
+  {
+    "id": 41,
+    "category": "integration",
+    "priority": 10,
+    "description": "RBAC unit and integration test suite (policy engine, caching, persistence, audit)",
+    "steps": [
+      "Assemble a suite exercising the full stack: seeded roles, can() checks, cache invalidation, and audit trail together",
+      "Run against dockerized MySQL",
+      "Run npm test and confirm all pass"
+    ],
+    "depends_on": [
+      33,
+      34,
+      35,
+      38
+    ],
+    "passes": false
+  },
+  {
+    "id": 42,
+    "category": "functional",
+    "priority": 9,
+    "description": "Permission grammar validator rejects malformed resource:action strings at every entry point",
+    "steps": [
+      "Apply the parser from feature 32 at every boundary that accepts a permission string (seed data, management API, config)",
+      "Write unit tests for malformed inputs at each entry point (not just the parser itself)"
+    ],
+    "depends_on": [
+      32
+    ],
+    "passes": false
+  },
+  {
+    "id": 43,
+    "category": "functional",
+    "priority": 13,
+    "description": "Role hierarchy / inheritance support",
+    "steps": [
+      "Extend the data model to allow a role to inherit permissions from parent role(s), with cycle detection",
+      "Update can() to resolve inherited permissions",
+      "Write unit tests for a 2-level hierarchy and a rejected cyclic hierarchy"
+    ],
+    "depends_on": [
+      33
+    ],
+    "passes": false
+  },
+  {
+    "id": 44,
+    "category": "integration",
+    "priority": 16,
+    "description": "RBAC admin HTTP routes (list/create/update roles, assign/revoke permissions)",
+    "steps": [
+      "Register routes through the api-gateway http:route capability, protected by rbac:check requiring rbac:manage",
+      "Validate request/response payloads with JSON schema",
+      "Write an integration test hitting the routes as an admin (allowed) and as a viewer (403 denied)"
+    ],
+    "depends_on": [
+      39,
+      59
+    ],
+    "passes": false
+  },
+  {
+    "id": 45,
+    "category": "functional",
+    "priority": 5,
+    "description": "html-renderer plugin manifest declaring the render:template capability",
+    "steps": [
+      "Create src/plugins/html-renderer/plugin.json following conventions",
+      "Validate the manifest",
+      "Write a unit test asserting the plugin is discoverable and valid"
+    ],
+    "depends_on": [
+      4,
+      6
+    ],
+    "passes": false
+  },
+  {
+    "id": 46,
+    "category": "functional",
+    "priority": 6,
+    "description": "Template parser/compiler: variables, conditionals, loops",
+    "steps": [
+      "Implement a small template language (mustache/handlebars-inspired) supporting {{var}}, {{#if}}, {{#each}}",
+      "Compile templates to reusable render functions rather than re-parsing on every render",
+      "Write unit tests for variable interpolation, nested conditionals, and loops over arrays/objects"
+    ],
+    "depends_on": [
+      45
+    ],
+    "passes": false
+  },
+  {
+    "id": 47,
+    "category": "functional",
+    "priority": 6,
+    "description": "Context-aware auto-escaping (HTML body, attribute, URL, JS contexts)",
+    "steps": [
+      "Detect the syntactic context of each interpolation site at compile time and apply the matching escaper",
+      "Default every interpolation to escaped output with no way to accidentally opt out",
+      "Write unit tests with adversarial strings (<script>, \" onmouseover=, javascript: URLs) for each context, asserting safe output"
+    ],
+    "depends_on": [
+      46
+    ],
+    "passes": false
+  },
+  {
+    "id": 48,
+    "category": "functional",
+    "priority": 7,
+    "description": "Layout system (base layout plus content blocks)",
+    "steps": [
+      "Implement layout templates that define named blocks a child template fills in",
+      "Support nested layouts (a layout extending another layout)",
+      "Write unit tests rendering a child template through a 2-level layout chain"
+    ],
+    "depends_on": [
+      46
+    ],
+    "passes": false
+  },
+  {
+    "id": 49,
+    "category": "functional",
+    "priority": 7,
+    "description": "Partials/components (reusable, parameterized template fragments)",
+    "steps": [
+      "Implement a partial-inclusion syntax that accepts parameters and renders in an isolated scope",
+      "Guard against infinite partial recursion with a max-depth error",
+      "Write unit tests for parameterized partials and the recursion guard"
+    ],
+    "depends_on": [
+      46
+    ],
+    "passes": false
+  },
+  {
+    "id": 50,
+    "category": "functional",
+    "priority": 8,
+    "description": "Explicit raw/unescaped output helper, audited",
+    "steps": [
+      "Add an intentionally verbose {{{raw expr}}} or similar syntax for the rare unescaped case",
+      "Every use of the raw helper logs an audit entry (plugin id, template, expression) via the kernel audit trail",
+      "Write a test asserting raw output is unescaped and produces an audit entry"
+    ],
+    "depends_on": [
+      47,
+      11
+    ],
+    "passes": false
+  },
+  {
+    "id": 51,
+    "category": "functional",
+    "priority": 9,
+    "description": "Theme/asset pipeline (static CSS/JS serving with cache headers)",
+    "steps": [
+      "Implement a static asset registration API plugins can use to publish CSS/JS/images under a namespaced path",
+      "Set appropriate Cache-Control/ETag headers on served assets",
+      "Write a test asserting a registered asset is served with correct headers and content"
+    ],
+    "depends_on": [
+      48
+    ],
+    "passes": false
+  },
+  {
+    "id": 52,
+    "category": "functional",
+    "priority": 8,
+    "description": "Expose render:template as a consumable capability",
+    "steps": [
+      "Register the compile/render functions as the render:template capability through the broker",
+      "Write a fixture consumer plugin proving the cross-plugin render contract works end-to-end",
+      "Write an integration test for the fixture consumer"
+    ],
+    "depends_on": [
+      46,
+      47
+    ],
+    "passes": false
+  },
+  {
+    "id": 53,
+    "category": "performance",
+    "priority": 10,
+    "description": "Compiled template caching with dev-mode invalidation on file change",
+    "steps": [
+      "Cache compiled render functions keyed by template path + mtime/hash",
+      "In development, detect source file changes and recompile; in production, cache is immutable per process lifetime",
+      "Write a test asserting a changed template is picked up in dev mode and cached (not recompiled) in production mode"
+    ],
+    "depends_on": [
+      46
+    ],
+    "passes": false
+  },
+  {
+    "id": 54,
+    "category": "integration",
+    "priority": 9,
+    "description": "XSS regression test suite across all escaping contexts",
+    "steps": [
+      "Build a table-driven test of known XSS payloads rendered through HTML/attribute/URL/JS contexts and the raw helper",
+      "Assert every non-raw context neutralizes every payload",
+      "Wire this suite into CI as a required check"
+    ],
+    "depends_on": [
+      47,
+      50
+    ],
+    "passes": false
+  },
+  {
+    "id": 55,
+    "category": "functional",
+    "priority": 10,
+    "description": "Safe error page templates (404/500) that never leak stack traces in production",
+    "steps": [
+      "Create default 404 and 500 templates rendered via the layout system",
+      "Ensure the 500 template only shows internal detail when NODE_ENV=development",
+      "Write a test asserting production mode hides error detail and development mode shows it"
+    ],
+    "depends_on": [
+      48
+    ],
+    "passes": false
+  },
+  {
+    "id": 56,
+    "category": "integration",
+    "priority": 9,
+    "description": "Unit test suite for html-renderer (parser, layouts, partials, caching)",
+    "steps": [
+      "Assemble tests covering the parser, layout nesting, partials, and the template cache together",
+      "Run npm test and confirm all pass"
+    ],
+    "depends_on": [
+      46,
+      48,
+      49,
+      53
+    ],
+    "passes": false
+  },
+  {
+    "id": 57,
+    "category": "functional",
+    "priority": 6,
+    "description": "api-gateway plugin manifest providing http:route and consuming rbac:check/render:template optionally",
+    "steps": [
+      "Create src/plugins/api-gateway/plugin.json following conventions",
+      "Validate the manifest",
+      "Write a unit test asserting the plugin is discoverable and valid"
+    ],
+    "depends_on": [
+      4,
+      6
+    ],
+    "passes": false
+  },
+  {
+    "id": 58,
+    "category": "functional",
+    "priority": 7,
+    "description": "Fastify instance owned by api-gateway, mounted into kernel bootstrap",
+    "steps": [
+      "Move Fastify construction out of the placeholder bootstrap and into the api-gateway plugin's onEnable hook",
+      "Kernel bootstrap starts listening only after all plugins have loaded successfully",
+      "Update the smoke test to go through the real bootstrap path and confirm /health still responds"
+    ],
+    "depends_on": [
+      57,
+      12
+    ],
+    "passes": false
+  },
+  {
+    "id": 59,
+    "category": "functional",
+    "priority": 7,
+    "description": "http:route capability: typed route registration API for other plugins",
+    "steps": [
+      "Expose a registerRoute({method, path, schema, handler}) capability wrapping Fastify's route API",
+      "Enforce that every registered route declares a request/response JSON schema",
+      "Write an integration test where a fixture plugin registers a route and it is reachable over HTTP"
+    ],
+    "depends_on": [
+      58
+    ],
+    "passes": false
+  },
+  {
+    "id": 60,
+    "category": "functional",
+    "priority": 8,
+    "description": "Request validation and a consistent 4xx error envelope",
+    "steps": [
+      "Wire Fastify's schema validation to reject invalid requests with a uniform JSON error shape ({code, message, details})",
+      "Write an integration test posting an invalid payload and asserting the exact error envelope shape"
+    ],
+    "depends_on": [
+      59
+    ],
+    "passes": false
+  },
+  {
+    "id": 61,
+    "category": "functional",
+    "priority": 8,
+    "description": "Centralized error handler with a consistent envelope and no stack-trace leaks in production",
+    "steps": [
+      "Implement a Fastify error handler that maps thrown AppError subclasses (feature 1) to HTTP status codes and safe messages",
+      "Ensure unexpected errors return a generic 500 body in production but full detail in development logs",
+      "Write a test asserting a thrown internal error never appears in the HTTP response body in production mode"
+    ],
+    "depends_on": [
+      58,
+      10
+    ],
+    "passes": false
+  },
+  {
+    "id": 62,
+    "category": "functional",
+    "priority": 8,
+    "description": "API versioning convention (/api/v1/...)",
+    "steps": [
+      "Extend registerRoute to prefix routes with a version segment, defaulting to v1",
+      "Document the versioning/deprecation policy in docs/api-versioning.md",
+      "Write a test asserting a registered route is reachable at the versioned path"
+    ],
+    "depends_on": [
+      59
+    ],
+    "passes": false
+  },
+  {
+    "id": 63,
+    "category": "functional",
+    "priority": 8,
+    "description": "Session/cookie handling with secure defaults",
+    "steps": [
+      "Wire @fastify/cookie with HttpOnly, Secure (config-driven), and SameSite=Lax defaults",
+      "Implement a signed session identifier issuance/verification helper",
+      "Write a test asserting a session cookie is issued with the correct flags and a tampered cookie is rejected"
+    ],
+    "depends_on": [
+      58
+    ],
+    "passes": false
+  },
+  {
+    "id": 64,
+    "category": "functional",
+    "priority": 9,
+    "description": "CSRF protection for state-changing routes",
+    "steps": [
+      "Implement a double-submit-cookie or synchronizer-token CSRF scheme applied to POST/PUT/PATCH/DELETE routes by default",
+      "Provide an explicit, audited opt-out for routes that are safe by construction (e.g. pure JSON APIs with strict CORS + no cookies)",
+      "Write a test asserting a state-changing request without a valid CSRF token is rejected"
+    ],
+    "depends_on": [
+      63
+    ],
+    "passes": false
+  },
+  {
+    "id": 65,
+    "category": "functional",
+    "priority": 10,
+    "description": "RBAC middleware integration: per-route required permission",
+    "steps": [
+      "Extend registerRoute with an optional requiredPermission field checked via rbac:check before the handler runs",
+      "Return 401 for unauthenticated and 403 for authenticated-but-unauthorized, without leaking which one more than necessary",
+      "Write an integration test for allowed, unauthenticated, and forbidden cases on a protected fixture route"
+    ],
+    "depends_on": [
+      59,
+      39
+    ],
+    "passes": false
+  },
+  {
+    "id": 66,
+    "category": "performance",
+    "priority": 9,
+    "description": "Configurable rate limiting (global and per-route)",
+    "steps": [
+      "Wire @fastify/rate-limit with global defaults from env config and support for stricter per-route overrides",
+      "Return a standard 429 with Retry-After on limit exceeded",
+      "Write a test that exceeds the limit and asserts a 429 response"
+    ],
+    "depends_on": [
+      58
+    ],
+    "passes": false
+  },
+  {
+    "id": 67,
+    "category": "functional",
+    "priority": 9,
+    "description": "Security headers (CSP, HSTS, X-Frame-Options, etc.) via helmet",
+    "steps": [
+      "Wire @fastify/helmet with a sensible default policy, configurable per-deployment",
+      "Write a test asserting the expected security headers are present on responses"
+    ],
+    "depends_on": [
+      58
+    ],
+    "passes": false
+  },
+  {
+    "id": 68,
+    "category": "functional",
+    "priority": 9,
+    "description": "Configurable CORS allow-list",
+    "steps": [
+      "Wire @fastify/cors driven by the CORS_ORIGIN env config, denying by default for unlisted origins",
+      "Write a test asserting an allowed origin gets CORS headers and a disallowed origin does not"
+    ],
+    "depends_on": [
+      58
+    ],
+    "passes": false
+  },
+  {
+    "id": 69,
+    "category": "functional",
+    "priority": 10,
+    "description": "Pagination and filtering helpers for list endpoints",
+    "steps": [
+      "Implement shared query-param parsing (page/limit/sort/filter) with validation and sane upper bounds",
+      "Provide a helper that turns parsed params into kysely query modifiers",
+      "Write a test for a fixture list route covering default, custom page size, and out-of-range page requests"
+    ],
+    "depends_on": [
+      59
+    ],
+    "passes": false
+  },
+  {
+    "id": 70,
+    "category": "functional",
+    "priority": 11,
+    "description": "OpenAPI documentation auto-generated from registered routes",
+    "steps": [
+      "Derive an OpenAPI 3 document from each route's JSON schema and expose it at /api/v1/openapi.json",
+      "Add a minimal Swagger UI (or equivalent) route for human browsing",
+      "Write a test asserting the generated document includes a route registered by a fixture plugin"
+    ],
+    "depends_on": [
+      59,
+      62
+    ],
+    "passes": false
+  },
+  {
+    "id": 71,
+    "category": "functional",
+    "priority": 10,
+    "description": "Request size limits and timeout configuration",
+    "steps": [
+      "Configure Fastify body size limits and request timeouts from env config",
+      "Write a test asserting an oversized payload is rejected before reaching the handler"
+    ],
+    "depends_on": [
+      58
+    ],
+    "passes": false
+  },
+  {
+    "id": 72,
+    "category": "integration",
+    "priority": 11,
+    "description": "api-gateway integration test suite (routing, validation, RBAC gating, rate limiting, CSRF, error envelope)",
+    "steps": [
+      "Assemble an end-to-end suite exercising the gateway as a whole against fixture routes",
+      "Run npm test and confirm all pass"
+    ],
+    "depends_on": [
+      60,
+      61,
+      64,
+      65,
+      66
+    ],
+    "passes": false
+  },
+  {
+    "id": 73,
+    "category": "functional",
+    "priority": 12,
+    "description": "plugin-builder plugin manifest",
+    "steps": [
+      "Create src/plugins/plugin-builder/plugin.json following conventions",
+      "Validate the manifest",
+      "Write a unit test asserting the plugin is discoverable and valid"
+    ],
+    "depends_on": [
+      15
+    ],
+    "passes": false
+  },
+  {
+    "id": 74,
+    "category": "functional",
+    "priority": 12,
+    "description": "Publish the plugin.json JSON Schema for external/programmatic reuse",
+    "steps": [
+      "Export the kernel's zod manifest schema as a standalone JSON Schema file under this plugin",
+      "Keep it generated from the single source of truth (feature 4) rather than hand-duplicated",
+      "Write a test asserting the exported schema validates the same fixtures the kernel validator does"
+    ],
+    "depends_on": [
+      15,
+      4
+    ],
+    "passes": false
+  },
+  {
+    "id": 75,
+    "category": "functional",
+    "priority": 13,
+    "description": "create-plugin generator: scaffolds manifest, lifecycle stubs, src/, tests/",
+    "steps": [
+      "Implement a generator function taking a plugin id and description, emitting a valid plugin directory from templates",
+      "Ensure generated output passes the kernel's manifest validator unmodified",
+      "Write a test that generates a plugin into a temp dir and validates every emitted file"
+    ],
+    "depends_on": [
+      74
+    ],
+    "passes": false
+  },
+  {
+    "id": 76,
+    "category": "functional",
+    "priority": 13,
+    "description": "CLI entry point wiring `npm run create-plugin`",
+    "steps": [
+      "Implement the CLI (src/plugins/plugin-builder/src/cli.ts) with prompts/flags for id, description, and capabilities",
+      "Wire it to package.json's create-plugin script",
+      "Write a test invoking the CLI programmatically (non-interactive flags) and asserting correct output"
+    ],
+    "depends_on": [
+      75
+    ],
+    "passes": false
+  },
+  {
+    "id": 77,
+    "category": "functional",
+    "priority": 13,
+    "description": "Static conventions linter for plugin directories",
+    "steps": [
+      "Implement a linter checking naming, capability declaration completeness, and forbidden cross-plugin internal imports",
+      "Run it against every shipped plugin as part of the test suite so drift is caught automatically",
+      "Write unit tests with a passing fixture and 3 failing fixtures (bad naming, undeclared capability use, forbidden import)"
+    ],
+    "depends_on": [
+      74
+    ],
+    "passes": false
+  },
+  {
+    "id": 78,
+    "category": "functional",
+    "priority": 12,
+    "description": "AI-agent-facing plugin authoring guide",
+    "steps": [
+      "Write docs/ai-plugin-authoring.md: an unambiguous, example-rich spec of the manifest, capability grammar, and directory conventions aimed at an AI coding agent as the reader",
+      "Include a worked example referencing the real rbac and database-mysql plugins as canonical patterns",
+      "Have a teammate/agent unfamiliar with the codebase attempt to follow only this doc to generate a trivial plugin, and record any ambiguity found as a doc fix"
+    ],
+    "depends_on": [
+      15,
+      17,
+      31,
+      45,
+      57
+    ],
+    "passes": false
+  },
+  {
+    "id": 79,
+    "category": "functional",
+    "priority": 14,
+    "description": "Reference hello-world plugin generated and proven to load in the real kernel",
+    "steps": [
+      "Use the generator from feature 75 to create a hello-world plugin committed to src/plugins/",
+      "Confirm it loads successfully at kernel bootstrap and appears in kernel introspection",
+      "Write an integration test asserting hello-world loads without modification after regeneration"
+    ],
+    "depends_on": [
+      75,
+      12
+    ],
+    "passes": false
+  },
+  {
+    "id": 80,
+    "category": "functional",
+    "priority": 14,
+    "description": "Programmatic generator API (usable by another plugin or an AI agent, not just the CLI)",
+    "steps": [
+      "Expose the generator as an importable function with a typed options object, independent of any CLI/stdin interaction",
+      "Write a test invoking the programmatic API directly, bypassing the CLI"
+    ],
+    "depends_on": [
+      75
+    ],
+    "passes": false
+  },
+  {
+    "id": 81,
+    "category": "functional",
+    "priority": 14,
+    "description": "Capability cross-check warnings in the generator/linter",
+    "steps": [
+      "Extend the linter to warn when a plugin declares capabilities.requires for a capability no loaded plugin provides",
+      "Write a test asserting the warning fires for an intentionally mismatched fixture"
+    ],
+    "depends_on": [
+      77
+    ],
+    "passes": false
+  },
+  {
+    "id": 82,
+    "category": "functional",
+    "priority": 15,
+    "description": "Capability index doc generator (which plugin provides/consumes what)",
+    "steps": [
+      "Implement a script that scans all plugin manifests and emits a Markdown table of provided/required capabilities",
+      "Wire it to run in CI and fail if the checked-in doc is stale (regenerate and diff)",
+      "Write a test asserting the generated table includes every shipped plugin's declared capabilities"
+    ],
+    "depends_on": [
+      74,
+      17,
+      31,
+      45,
+      57
+    ],
+    "passes": false
+  },
+  {
+    "id": 83,
+    "category": "integration",
+    "priority": 14,
+    "description": "Generator output validity test suite",
+    "steps": [
+      "Assert generated plugin output passes both the manifest validator and the conventions linter automatically as part of npm test",
+      "Cover generation with the minimal option set and with a fuller option set (capabilities, description)"
+    ],
+    "depends_on": [
+      75,
+      77
+    ],
+    "passes": false
+  },
+  {
+    "id": 84,
+    "category": "functional",
+    "priority": 16,
+    "description": "Plugin manifest version bump helper",
+    "steps": [
+      "Implement a small utility that safely bumps a plugin's semver version in plugin.json and validates the result",
+      "Write a test asserting an invalid target version is rejected and a valid one updates the file correctly"
+    ],
+    "depends_on": [
+      74
+    ],
+    "passes": false
+  },
+  {
+    "id": 85,
+    "category": "functional",
+    "priority": 12,
+    "description": "wiki plugin manifest (depends on rbac:check, db:query, render:template, http:route)",
+    "steps": [
+      "Create src/plugins/wiki/plugin.json following conventions, declaring all four required capabilities",
+      "Validate the manifest",
+      "Write a unit test asserting the plugin is discoverable and valid"
+    ],
+    "depends_on": [
+      4,
+      6
+    ],
+    "passes": false
+  },
+  {
+    "id": 86,
+    "category": "functional",
+    "priority": 13,
+    "description": "Database schema/migrations: pages, revisions, namespaces",
+    "steps": [
+      "Add wiki_pages, wiki_revisions, wiki_namespaces migrations under the wiki_ table namespace",
+      "Include appropriate indexes (namespace+slug uniqueness, revision lookup by page)",
+      "Write an integration test applying the migrations and asserting constraints (unique slug per namespace) are enforced"
+    ],
+    "depends_on": [
+      19,
+      22,
+      85
+    ],
+    "passes": false
+  },
+  {
+    "id": 87,
+    "category": "functional",
+    "priority": 13,
+    "description": "Page CRUD via the db:query capability",
+    "steps": [
+      "Implement create/read/update/delete for wiki pages entirely through db:query, no direct SQL client usage",
+      "Enforce slug format validation and namespace existence on create",
+      "Write integration tests for each CRUD operation including not-found and duplicate-slug error paths"
+    ],
+    "depends_on": [
+      86,
+      20
+    ],
+    "passes": false
+  },
+  {
+    "id": 88,
+    "category": "functional",
+    "priority": 13,
+    "description": "Markdown-to-HTML rendering via html-renderer's render:template",
+    "steps": [
+      "Implement a safe Markdown parser (no raw HTML passthrough by default) producing an AST or HTML string fed into render:template as data, not as a raw string",
+      "Ensure the auto-escaping from feature 47 still applies to any user-controlled text inside the rendered output",
+      "Write a test rendering a page containing an XSS-style payload in Markdown and asserting it is neutralized"
+    ],
+    "depends_on": [
+      87,
+      52
+    ],
+    "passes": false
+  },
+  {
+    "id": 89,
+    "category": "functional",
+    "priority": 14,
+    "description": "Revision history: every edit creates a revision row",
+    "steps": [
+      "On every page update, snapshot the previous content into wiki_revisions before applying the change",
+      "Implement an endpoint/function to list revisions for a page in reverse-chronological order",
+      "Write a test asserting 3 sequential edits produce 3 retrievable revisions in the correct order"
+    ],
+    "depends_on": [
+      86,
+      87
+    ],
+    "passes": false
+  },
+  {
+    "id": 90,
+    "category": "functional",
+    "priority": 15,
+    "description": "Diff view between two revisions",
+    "steps": [
+      "Implement a line-based diff between any two revisions of the same page",
+      "Render the diff safely through html-renderer (no raw HTML injection from diffed content)",
+      "Write a test asserting additions/deletions are correctly identified for a known before/after pair"
+    ],
+    "depends_on": [
+      89
+    ],
+    "passes": false
+  },
+  {
+    "id": 91,
+    "category": "functional",
+    "priority": 14,
+    "description": "Page tree / navigation sidebar reflecting namespace hierarchy",
+    "steps": [
+      "Implement a query building a nested tree structure from wiki_namespaces and page slugs",
+      "Write a test asserting a 3-level namespace hierarchy produces the correct nested structure"
+    ],
+    "depends_on": [
+      87
+    ],
+    "passes": false
+  },
+  {
+    "id": 92,
+    "category": "performance",
+    "priority": 15,
+    "description": "Full-text search across pages",
+    "steps": [
+      "Add a MySQL FULLTEXT index on page title/content and implement a search function using it, with a LIKE-based fallback path documented for non-FULLTEXT-capable configurations",
+      "Rank results by relevance and return snippets with the matched term highlighted (safely escaped)",
+      "Write a test asserting a search term matches the expected pages and irrelevant pages are excluded"
+    ],
+    "depends_on": [
+      86
+    ],
+    "passes": false
+  },
+  {
+    "id": 93,
+    "category": "functional",
+    "priority": 14,
+    "description": "RBAC integration: read/write/admin permissions per page or namespace",
+    "steps": [
+      "Define the wiki: permission grammar (wiki:read, wiki:write, wiki:admin, optionally namespaced) and apply rbac:check on every mutating and restricted-read operation",
+      "Default to viewer-readable/editor-writable unless a namespace overrides it",
+      "Write integration tests for allowed and denied access at each permission level"
+    ],
+    "depends_on": [
+      87,
+      39
+    ],
+    "passes": false
+  },
+  {
+    "id": 94,
+    "category": "integration",
+    "priority": 14,
+    "description": "Wiki HTTP routes via api-gateway (list/get/create/update/delete/search/history/diff)",
+    "steps": [
+      "Register all wiki routes through the http:route capability with JSON-schema validation and the appropriate requiredPermission per route",
+      "Apply the API versioning convention from feature 62",
+      "Write an integration test suite hitting every route over real HTTP against a test server instance"
+    ],
+    "depends_on": [
+      59,
+      87,
+      88
+    ],
+    "passes": false
+  },
+  {
+    "id": 95,
+    "category": "functional",
+    "priority": 15,
+    "description": "Wiki home page and navigation UI rendered via html-renderer layouts",
+    "steps": [
+      "Build the home page and page-view templates using the layout/partial system from html-renderer",
+      "Wire the navigation sidebar from feature 91 into the shared layout",
+      "Write a test rendering the home page and asserting key navigation elements are present"
+    ],
+    "depends_on": [
+      91,
+      52
+    ],
+    "passes": false
+  },
+  {
+    "id": 96,
+    "category": "functional",
+    "priority": 15,
+    "description": "Page edit form UI with CSRF-protected submission",
+    "steps": [
+      "Build create/edit page templates with a form posting through the CSRF-protected route from feature 64",
+      "Show validation errors returned by the API inline in the form",
+      "Write a test asserting a submission without a valid CSRF token is rejected end-to-end through the real UI flow"
+    ],
+    "depends_on": [
+      94,
+      64
+    ],
+    "passes": false
+  },
+  {
+    "id": 97,
+    "category": "functional",
+    "priority": 17,
+    "description": "Attachments/file upload support for wiki pages",
+    "steps": [
+      "Implement size-limited, content-type-validated file upload tied to a page, stored outside the webroot with randomized storage names",
+      "Serve attachments through an authorization-checked route (respecting the page's permissions), never directly from a static directory",
+      "Write a test asserting an oversized or disallowed-type upload is rejected, and a valid upload is retrievable only by an authorized user"
+    ],
+    "depends_on": [
+      87,
+      71
+    ],
+    "passes": false
+  },
+  {
+    "id": 98,
+    "category": "functional",
+    "priority": 15,
+    "description": "Wiki-level audit log surfaced via the kernel audit trail",
+    "steps": [
+      "Record create/update/delete/permission-denied events for wiki pages to the kernel audit trail with actor and page identity",
+      "Provide a simple admin view/query listing recent wiki audit entries",
+      "Write a test asserting an edit produces a queryable audit entry with the correct actor"
+    ],
+    "depends_on": [
+      11,
+      87
+    ],
+    "passes": false
+  },
+  {
+    "id": 99,
+    "category": "functional",
+    "priority": 16,
+    "description": "Wiki seed content (starter Home page and platform documentation)",
+    "steps": [
+      "Register a seed creating a Home page and a few docs pages describing the platform itself (dogfooding spec.md content)",
+      "Ensure the seed is idempotent",
+      "Write a test asserting seeding twice does not duplicate the Home page"
+    ],
+    "depends_on": [
+      87
+    ],
+    "passes": false
+  },
+  {
+    "id": 100,
+    "category": "integration",
+    "priority": 16,
+    "description": "End-to-end wiki test suite (create/edit/view/search/permission-denied flows)",
+    "steps": [
+      "Assemble a suite driving the real HTTP API (and, where practical, the rendered HTML) through a full page lifecycle including a permission-denied case",
+      "Run npm test and confirm all pass"
+    ],
+    "depends_on": [
+      94,
+      93
+    ],
+    "passes": false
+  },
+  {
+    "id": 101,
+    "category": "performance",
+    "priority": 17,
+    "description": "Wiki rendered-page caching with invalidation on edit",
+    "steps": [
+      "Cache rendered HTML for a page keyed by page id + revision id",
+      "Invalidate (or simply let the key change) immediately on any edit",
+      "Write a test asserting a stale cached render is never served after an edit"
+    ],
+    "depends_on": [
+      88,
+      95
+    ],
+    "passes": false
+  },
+  {
+    "id": 102,
+    "category": "style",
+    "priority": 17,
+    "description": "Accessibility pass on wiki HTML templates",
+    "steps": [
+      "Review wiki templates for semantic HTML, form label associations, and keyboard navigability",
+      "Fix identified issues (heading order, alt text on any images, focus states)",
+      "Write a lightweight automated check (e.g. axe-core against rendered HTML) as part of the test suite"
+    ],
+    "depends_on": [
+      95,
+      96
+    ],
+    "passes": false
+  },
+  {
+    "id": 103,
+    "category": "integration",
+    "priority": 6,
+    "description": "CI pipeline: lint, typecheck, build, unit tests on push/PR",
+    "steps": [
+      "Add a GitHub Actions workflow running npm ci, lint, build, and test on every push and pull request",
+      "Fail the workflow on any lint, type, or test error",
+      "Push a trivial branch/PR (or simulate locally with act, if available) and confirm the workflow definition is syntactically valid"
+    ],
+    "depends_on": [],
+    "passes": false
+  },
+  {
+    "id": 104,
+    "category": "integration",
+    "priority": 10,
+    "description": "Dependency vulnerability scanning in CI",
+    "steps": [
+      "Add an `npm audit --audit-level=high` (or equivalent) step to the CI workflow",
+      "Document the remediation process for a flagged vulnerability in docs/security.md",
+      "Confirm the step fails the build on a high/critical finding by testing against a known-vulnerable fixture package.json in a scratch branch"
+    ],
+    "depends_on": [
+      103
+    ],
+    "passes": false
+  },
+  {
+    "id": 105,
+    "category": "style",
+    "priority": 8,
+    "description": "Pre-commit hooks for lint and format on staged files",
+    "steps": [
+      "Wire husky + lint-staged to run eslint --fix and prettier on staged files before commit",
+      "Document setup in README (one-time `npm install` sets up the hook)",
+      "Confirm a deliberately malformatted staged file gets auto-fixed on commit"
+    ],
+    "depends_on": [],
+    "passes": false
+  },
+  {
+    "id": 106,
+    "category": "integration",
+    "priority": 11,
+    "description": "Secrets-in-code scanning in CI",
+    "steps": [
+      "Add a gitleaks (or equivalent) step to the CI workflow scanning the diff/history for committed secrets",
+      "Confirm it flags a deliberately committed fake secret in a scratch test and is removed before merging"
+    ],
+    "depends_on": [
+      103
+    ],
+    "passes": false
+  },
+  {
+    "id": 107,
+    "category": "functional",
+    "priority": 15,
+    "description": "Production Docker image (multi-stage, non-root user, minimal base)",
+    "steps": [
+      "Write a multi-stage Dockerfile: build stage compiles TypeScript, runtime stage copies only dist/ and prod deps, runs as a non-root user",
+      "Confirm the image builds and the container serves /health correctly",
+      "Document image build/run instructions in README"
+    ],
+    "depends_on": [
+      12,
+      58
+    ],
+    "passes": false
+  },
+  {
+    "id": 108,
+    "category": "functional",
+    "priority": 9,
+    "description": "Structured request logging with correlation/request IDs",
+    "steps": [
+      "Generate a request ID per incoming HTTP request and attach it to all log lines produced during that request's lifecycle",
+      "Return the request ID in an X-Request-Id response header for client-side correlation",
+      "Write a test asserting the same request ID appears in both the response header and the corresponding log entries"
+    ],
+    "depends_on": [
+      58,
+      3
+    ],
+    "passes": false
+  },
+  {
+    "id": 109,
+    "category": "performance",
+    "priority": 12,
+    "description": "Document and tune default rate-limit / DoS mitigation settings",
+    "steps": [
+      "Review and tune the defaults from feature 66 against realistic traffic assumptions",
+      "Write docs/rate-limiting.md explaining the defaults and how operators should adjust them",
+      "Add a test asserting the documented defaults match the actual configured values (no drift)"
+    ],
+    "depends_on": [
+      66
+    ],
+    "passes": false
+  },
+  {
+    "id": 110,
+    "category": "performance",
+    "priority": 18,
+    "description": "Load testing harness with a documented baseline",
+    "steps": [
+      "Write an autocannon or k6 script exercising key api-gateway and wiki routes under load",
+      "Run it against a local instance and record baseline throughput/latency numbers in docs/performance-baseline.md",
+      "Re-run after any major kernel/plugin change and note regressions"
+    ],
+    "depends_on": [
+      94
+    ],
+    "passes": false
+  },
+  {
+    "id": 111,
+    "category": "functional",
+    "priority": 11,
+    "description": "Graceful shutdown on SIGTERM/SIGINT",
+    "steps": [
+      "Implement a shutdown sequence: stop accepting new connections, drain in-flight requests, close the DB pool, then exit",
+      "Set a hard shutdown timeout so the process cannot hang indefinitely",
+      "Write a test (can be a script-driven integration test) sending SIGTERM and asserting clean exit within the timeout"
+    ],
+    "depends_on": [
+      12,
+      18
+    ],
+    "passes": false
+  },
+  {
+    "id": 112,
+    "category": "integration",
+    "priority": 19,
+    "description": "OWASP Top 10 self-audit against the running application",
+    "steps": [
+      "Walk the OWASP Top 10 categories against the actual implemented app (injection, broken auth, XSS, access control, etc.) and record findings in docs/security-review.md",
+      "File and fix any concrete issues found as follow-up commits before marking this feature passing",
+      "Re-run the full test suite after fixes to confirm no regressions"
+    ],
+    "depends_on": [
+      100,
+      72,
+      41
+    ],
+    "passes": false
+  },
+  {
+    "id": 113,
+    "category": "functional",
+    "priority": 18,
+    "description": "Backup/disaster-recovery runbook",
+    "steps": [
+      "Write docs/disaster-recovery.md covering backup schedule expectations, restore procedure (referencing feature 28's scripts), and a recovery-time checklist",
+      "Perform a dry-run restore into a scratch database and record the steps that actually worked"
+    ],
+    "depends_on": [
+      28
+    ],
+    "passes": false
+  },
+  {
+    "id": 114,
+    "category": "functional",
+    "priority": 17,
+    "description": "Operator documentation: installing a plugin, granting capabilities, configuring env",
+    "steps": [
+      "Write docs/operator-guide.md covering environment configuration, how to add a new plugin to a deployment, and how capability grants are managed",
+      "Cross-link it from README",
+      "Have it reviewed against the actual current behavior of the kernel (no aspirational/inaccurate claims)"
+    ],
+    "depends_on": [
+      78,
+      2
+    ],
+    "passes": false
+  },
+  {
+    "id": 115,
+    "category": "style",
+    "priority": 12,
+    "description": "Contribution guide and coding standards",
+    "steps": [
+      "Write CONTRIBUTING.md covering branch/commit conventions, the infinite-dev feature workflow, lint/test requirements, and PR expectations",
+      "Cross-link it from README"
+    ],
+    "depends_on": [],
+    "passes": false
+  },
+  {
+    "id": 116,
+    "category": "functional",
+    "priority": 12,
+    "description": "End-to-end wired 404/500 error pages through html-renderer and api-gateway",
+    "steps": [
+      "Connect the error templates from feature 55 to the api-gateway error handler from feature 61 so unhandled routes/errors render the styled pages instead of bare JSON for browser requests",
+      "Preserve JSON error envelopes for API/XHR requests based on Accept header",
+      "Write a test asserting an unknown route returns the styled 404 page for a browser-like request and a JSON envelope for an API request"
+    ],
+    "depends_on": [
+      55,
+      61
+    ],
+    "passes": false
+  },
+  {
+    "id": 117,
+    "category": "functional",
+    "priority": 8,
+    "description": "Fail-fast, clear startup errors on invalid configuration",
+    "steps": [
+      "Ensure any config validation failure during bootstrap prints a single clear message identifying the offending variable(s) and exits non-zero, with no partial/half-started server",
+      "Write a test that boots with an intentionally invalid config and asserts the process exits before binding a port"
+    ],
+    "depends_on": [
+      2,
+      12
+    ],
+    "passes": false
+  },
+  {
+    "id": 118,
+    "category": "integration",
+    "priority": 16,
+    "description": "Least-privilege capability audit script",
+    "steps": [
+      "Implement a script comparing each plugin's declared capabilities.requires against capabilities it actually invoked at runtime (instrumented via the broker)",
+      "Report any plugin using more than it declared (should be impossible by construction) or declaring more than it uses (over-privileged)",
+      "Run it against the full shipped plugin set and resolve any findings"
+    ],
+    "depends_on": [
+      7,
+      77
+    ],
+    "passes": false
+  },
+  {
+    "id": 119,
+    "category": "performance",
+    "priority": 18,
+    "description": "Kernel plugin-dispatch overhead benchmark",
+    "steps": [
+      "Write a micro-benchmark measuring capability broker call overhead and event bus dispatch overhead under load",
+      "Record baseline numbers in docs/performance-baseline.md alongside the load test results from feature 110",
+      "Flag in the doc what overhead budget future plugins should stay within"
+    ],
+    "depends_on": [
+      12
+    ],
+    "passes": false
+  },
+  {
+    "id": 120,
+    "category": "integration",
+    "priority": 20,
+    "description": "Final end-to-end smoke suite: fresh clone through running wiki",
+    "steps": [
+      "From a clean checkout, run init.sh, then npm test, then boot the server and fetch the wiki home page over real HTTP",
+      "Confirm every shipped plugin (rbac, database-mysql, html-renderer, api-gateway, plugin-builder, wiki) reports healthy in kernel introspection",
+      "Document this exact sequence as the canonical verification procedure in README"
+    ],
+    "depends_on": [
+      94,
+      100,
+      103
+    ],
+    "passes": false
+  }
+]

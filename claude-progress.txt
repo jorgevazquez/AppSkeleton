@@ -1,0 +1,54 @@
+# AppSkeleton — Development Progress Log
+
+Project initialized via the infinite-dev workflow. See spec.md for full
+architecture and feature_list.json for the build backlog (120 features).
+
+---
+
+## 2026-08-16 — Project initialization
+
+### What was done:
+- Designed the plugin-kernel architecture: kernel (src/core) is the only
+  non-plugin code; everything else — rbac, database-mysql, html-renderer,
+  api-gateway, plugin-builder, wiki — is a self-contained plugin talking to
+  the kernel only through declared, broker-granted capabilities.
+- Decided the tech stack: TypeScript (strict) on Node 20+, Fastify for HTTP,
+  MySQL 8 via mysql2 + kysely, zod for schema validation, vitest for tests.
+  Documented in spec.md.
+- Wrote feature_list.json: 120 features covering kernel foundation (16),
+  database-mysql (14), rbac (14), html-renderer (12), api-gateway (16),
+  plugin-builder (12), wiki (18), and cross-cutting security/performance/
+  testing/ops concerns (18). Ordered by priority with dependency chains so
+  the kernel lands first, then plugins in dependency order (database-mysql
+  and html-renderer before api-gateway before wiki; rbac early since most
+  plugins depend on it; plugin-builder after enough real plugins exist to
+  document conventions from).
+- Scaffolded the repo: package.json, tsconfig.json, eslint/prettier config,
+  vitest config, docker-compose.yml (MySQL 8 for local dev), .env.example,
+  init.sh (idempotent setup), and an empty src/plugins/* directory per
+  shipped plugin with a README explaining it's built out via the feature
+  list, not hand-authored ahead of it.
+- Added a minimal placeholder Fastify bootstrap (src/server/index.ts) with
+  a /health route and a smoke test, purely to prove the toolchain works
+  end-to-end before the real kernel (feature #12) replaces it.
+- Copied dev-agent.py and AGENTS.md from the infinite-dev skill into the
+  project root as the state-tracking/execution harness.
+
+### Testing:
+- Ran `python3 dev-agent.py status` / `next` / `find-parallel` against the
+  generated feature_list.json — all commands work, dependency resolution
+  correctly surfaces features #1-3 as the first parallelizable batch.
+- feature_list.json validated: 120 unique sequential ids, every depends_on
+  reference points at a real id.
+
+### Notes:
+- Execution mode: running Mode B (autopilot, `python dev-agent.py run`) per
+  the user's explicit "perform the work completely autonomously" + "keep
+  track of state in case interrupted" instructions. This spawns a fresh
+  `claude -p --dangerously-skip-permissions` subprocess per feature so
+  progress survives context/session resets by construction.
+- If resuming this project after an interruption: read spec.md, then run
+  `python3 dev-agent.py status` to see where things stand, then either
+  continue the autopilot loop or pick up in Mode A per AGENTS.md.
+- Do NOT modify feature_list.json descriptions/steps — only the `passes`
+  field, via `dev-agent.py complete` / `skip`.
