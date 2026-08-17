@@ -163,6 +163,28 @@ export class DatabaseError extends AppError {
   }
 }
 
+/**
+ * The database-mysql plugin's migration runner (feature #19) refused to run
+ * — either because an already-applied migration file's checksum no longer
+ * matches what was recorded when it ran (the file was modified after the
+ * fact, or an applied migration's file is missing entirely), or because a
+ * migration's `up`/`down` module is malformed (missing a required export).
+ * Never thrown for a driver-level failure while actually executing a
+ * migration's SQL — that surfaces as {@link DatabaseError} instead, since it
+ * crosses the same "real query failed" boundary db:query/db:transaction do.
+ * `message` may safely include migration file names/checksums (never file
+ * *contents*); `publicMessage` stays generic since this is an
+ * operator/CLI-facing failure, not something an API client should ever see.
+ */
+export class MigrationError extends AppError {
+  readonly code = "MIGRATION_ERROR";
+  readonly statusCode = 500;
+
+  protected override defaultPublicMessage(): string {
+    return "A database migration error occurred.";
+  }
+}
+
 /** Narrow an unknown thrown value down to the AppError taxonomy. */
 export function isAppError(error: unknown): error is AppError {
   return error instanceof AppError;

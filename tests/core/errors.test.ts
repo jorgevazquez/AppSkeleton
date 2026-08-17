@@ -4,6 +4,7 @@ import {
   CapabilityDeniedError,
   ConfigError,
   DatabaseError,
+  MigrationError,
   PluginLoadError,
   ValidationError,
   isAppError,
@@ -82,6 +83,26 @@ describe("DatabaseError", () => {
     const error = new DatabaseError("ER_DUP_ENTRY: Duplicate entry 'x' for key 'PRIMARY'");
     expect(error.publicMessage).not.toContain("ER_DUP_ENTRY");
     expect(error.publicMessage).not.toContain("PRIMARY");
+    expect(error.publicMessage.length).toBeGreaterThan(0);
+  });
+});
+
+describe("MigrationError", () => {
+  it("carries a stable machine-readable code and status", () => {
+    const error = new MigrationError(
+      "migration '0001_create_widgets.ts' checksum mismatch: recorded abc123, computed def456",
+    );
+    expect(error).toBeInstanceOf(AppError);
+    expect(error.code).toBe("MIGRATION_ERROR");
+    expect(error.statusCode).toBe(500);
+  });
+
+  it("has a safe default public message that does not leak migration/checksum detail", () => {
+    const error = new MigrationError(
+      "migration '0001_create_widgets.ts' checksum mismatch: recorded abc123, computed def456",
+    );
+    expect(error.publicMessage).not.toContain("0001_create_widgets.ts");
+    expect(error.publicMessage).not.toContain("abc123");
     expect(error.publicMessage.length).toBeGreaterThan(0);
   });
 });
