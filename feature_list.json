@@ -36,7 +36,7 @@
       "Write unit tests proving a log call containing a secret-like field never appears in the emitted output"
     ],
     "depends_on": [],
-    "passes": false
+    "passes": true
   },
   {
     "id": 4,
