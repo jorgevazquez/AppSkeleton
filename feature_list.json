@@ -10,7 +10,7 @@
       "Verify errors serialize to a JSON shape suitable for API error envelopes without including stack traces by default"
     ],
     "depends_on": [],
-    "passes": false
+    "passes": true
   },
   {
     "id": 2,
