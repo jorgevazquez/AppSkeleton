@@ -102,6 +102,24 @@ function pickDefined(
   return picked;
 }
 
+/**
+ * Reduce a ZodError's issues down to a safe, public-envelope-suitable shape:
+ * only the field path and the zod error code. Deliberately drops
+ * `issue.received` (the actual offending value — for an `invalid_literal`/
+ * `invalid_enum_value` issue on a credential-shaped field, that's the raw
+ * secret itself) and `issue.message` (which zod folds the received value
+ * into for those same issue codes). `AppError#toJSON()` serializes
+ * `details` into the public API error envelope unconditionally (unlike
+ * `stack`, which requires an explicit opt-in), so nothing placed in
+ * `details` here may ever contain a raw config value.
+ */
+function sanitizeZodIssues(error: ZodError): { path: string; code: string }[] {
+  return error.issues.map((issue) => ({
+    path: issue.path.length > 0 ? issue.path.join(".") : "(root)",
+    code: issue.code,
+  }));
+}
+
 /** Render a ZodError as a single, human-readable, actionable message. */
 function formatZodError(error: ZodError): string {
   const issues = error.issues.map((issue) => {
@@ -133,7 +151,7 @@ export function loadConfig<Shape extends ZodRawShape>(
   const result = schema.safeParse(merged);
   if (!result.success) {
     throw new ConfigError(formatZodError(result.error), {
-      details: { issues: result.error.issues },
+      details: { issues: sanitizeZodIssues(result.error) },
       cause: result.error,
     });
   }

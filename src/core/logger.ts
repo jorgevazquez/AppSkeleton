@@ -43,10 +43,15 @@
  *
  * Redaction is a best-effort deep walk, not pino's path-based `redact`
  * option — it does not require the caller to know field paths in advance.
- * To avoid corrupting values that manage their own JSON representation, it
- * leaves a few kinds of value untouched (returned as-is, not descended
- * into): `Date`, `RegExp`, `Map`, `Set`, typed arrays/`Buffer`, and any
- * object exposing its own `toJSON()`. `Error` instances (including
+ * A few well-known built-in types are left untouched (returned as-is, not
+ * descended into) because their own serialization is already safe and
+ * well-defined: `Date`, `RegExp`, `Map`, `Set`, typed arrays/`Buffer`. Any
+ * *other* object exposing a custom `toJSON()` is NOT treated as opaque —
+ * pino calls `toJSON()` during serialization regardless of what this module
+ * does, so skipping it would let a class like a config/connection-string
+ * wrapper (`toJSON() { return { apiKey: "..." } }`) sail through
+ * unredacted. Instead its `toJSON()` output is computed and that output is
+ * redacted recursively, in place of the object itself. `Error` instances (including
  * {@link "./errors.js".AppError} subclasses) are handled specially: a
  * redacted clone is produced that preserves the original prototype
  * (so pino's error serializer still reports the right `type`) and
@@ -105,15 +110,20 @@ function isSecretLikeKey(key: string): boolean {
   return REDACTED_FIELD_NAMES.some((name) => normalized.includes(name));
 }
 
-/** Values pino/JSON.stringify know how to serialize themselves; redact around them, not into them. */
-function isOpaqueValue(value: object): boolean {
+/**
+ * Well-known built-in types whose own serialization is already safe and
+ * well-defined — redact around them, not into them. Unlike a custom
+ * `toJSON()`, none of these can be authored by application code to smuggle
+ * a secret-like field through, so it's safe to leave them untouched rather
+ * than redacting their (fixed-shape) serialized form.
+ */
+function isKnownSafeOpaqueValue(value: object): boolean {
   return (
     value instanceof Date ||
     value instanceof RegExp ||
     value instanceof Map ||
     value instanceof Set ||
-    ArrayBuffer.isView(value) ||
-    typeof (value as { toJSON?: unknown }).toJSON === "function"
+    ArrayBuffer.isView(value)
   );
 }
 
@@ -156,8 +166,17 @@ function redactValue(value: unknown, seen: WeakSet<object>): unknown {
     return redactError(value, seen);
   }
 
-  if (isOpaqueValue(value)) {
+  if (isKnownSafeOpaqueValue(value)) {
     return value;
+  }
+
+  const toJSON = (value as { toJSON?: unknown }).toJSON;
+  if (typeof toJSON === "function") {
+    // pino/JSON.stringify will call this during serialization no matter
+    // what we return here, so redact the representation it will actually
+    // emit rather than the (possibly secret-bearing) object itself.
+    const serialized: unknown = (toJSON as () => unknown).call(value);
+    return redactValue(serialized, seen);
   }
 
   const redacted: Record<string, unknown> = {};
@@ -176,13 +195,18 @@ export function redactSecrets<T>(value: T): T {
   return redactValue(value, new WeakSet<object>()) as T;
 }
 
-/** Redact only the first ("merging object" / error) argument of a pino log call; message/interpolation args are never objects worth redacting. */
+/**
+ * Redact every object-shaped argument of a pino log call — not just the
+ * first. Pino supports both `logger.info(mergingObject, msg, ...values)`
+ * and printf-style `logger.info(template, ...values)`, and any of `values`
+ * can itself be an object that pino serializes via a `%j`/`%o` placeholder
+ * — a secret-bearing object passed that way must be redacted exactly like
+ * the merging-object case, or it reaches the emitted line untouched.
+ */
 function redactLogArgs(inputArgs: unknown[]): unknown[] {
-  const [first, ...rest] = inputArgs;
-  if (first !== null && typeof first === "object") {
-    return [redactValue(first, new WeakSet<object>()), ...rest];
-  }
-  return inputArgs;
+  return inputArgs.map((arg) =>
+    arg !== null && typeof arg === "object" ? redactValue(arg, new WeakSet<object>()) : arg,
+  );
 }
 
 /**

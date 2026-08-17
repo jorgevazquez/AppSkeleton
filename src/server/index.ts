@@ -10,10 +10,19 @@
  * features so progress stays visible in feature_list.json.
  */
 import Fastify from "fastify";
+import { createLogger } from "../core/logger.js";
 
 export function buildServer() {
   const app = Fastify({
-    logger: true,
+    // Use the kernel's own createLogger() rather than Fastify's built-in
+    // `logger: true` pino instance — the latter has no knowledge of this
+    // codebase's secret-redaction hook, so a future route handler logging
+    // e.g. `request.log.info({ headers: request.headers }, ...)` would emit
+    // an Authorization header (or any other secret-shaped field) in the
+    // clear. `loggerInstance` reuses one already-redacting logger for
+    // Fastify's own request logging and every `request.log` child logger
+    // derived from it.
+    loggerInstance: createLogger({ context: { module: "http" } }),
   });
 
   app.get("/health", async () => ({ status: "ok" }));

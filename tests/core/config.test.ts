@@ -54,6 +54,48 @@ describe("loadConfig — missing required var", () => {
   });
 });
 
+describe("loadConfig — security review regression: enum/literal rejection must not leak the raw value", () => {
+  it("does not include the raw rejected value anywhere in details.issues when an enum-typed field fails validation", () => {
+    const schema = z.object({
+      SECRET_MODE: z.enum(["alpha", "beta", "gamma"]),
+    });
+    const leakedSecret = "sk-live-abc123-should-not-leak";
+
+    try {
+      loadConfig({ schema, defaults: {}, env: { SECRET_MODE: leakedSecret } });
+      expect.fail("expected loadConfig to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConfigError);
+      const configError = error as ConfigError;
+
+      // details is what AppError#toJSON() serializes unconditionally into
+      // the public API error envelope (unlike stack, which is opt-in) — it
+      // must never carry zod's raw `received`/`message` fields, which for
+      // invalid_enum_value issues embed the actual offending value.
+      const json = configError.toJSON();
+      expect(JSON.stringify(json)).not.toContain(leakedSecret);
+      expect(JSON.stringify(configError.details)).not.toContain(leakedSecret);
+    }
+  });
+
+  it("details.issues only carries a safe {path, code} shape, never zod's raw issue object", () => {
+    const schema = z.object({ SECRET_MODE: z.literal("expected-value") });
+
+    try {
+      loadConfig({ schema, defaults: {}, env: { SECRET_MODE: "sk-live-leaked-value" } });
+      expect.fail("expected loadConfig to throw");
+    } catch (error) {
+      const configError = error as ConfigError;
+      const issues = configError.details?.["issues"] as Record<string, unknown>[] | undefined;
+      expect(issues).toHaveLength(1);
+      const issue = issues?.[0];
+      expect(issue).toEqual({ path: "SECRET_MODE", code: expect.any(String) });
+      expect(issue).not.toHaveProperty("received");
+      expect(issue).not.toHaveProperty("message");
+    }
+  });
+});
+
 describe("loadConfig / loadCoreConfig — valid config loads correctly", () => {
   it("loads the core config from defaults alone when env/override are empty", () => {
     const config = loadCoreConfig({ env: {} });

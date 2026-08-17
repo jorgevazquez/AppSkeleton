@@ -370,6 +370,61 @@ describe("loadPlugins — a failing plugin's already-loaded dependencies are not
   });
 });
 
+describe("loadPlugins — security review regressions: a failing plugin's own partial state is rolled back", () => {
+  it("revokes a capability grant obtained earlier in the same failed load attempt", async () => {
+    const log: string[] = [];
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("provider", { provides: ["svc:x"] }),
+        module: trackingModule("provider", log, { provides: { "svc:x": () => "ok" } }),
+      },
+      {
+        manifest: manifest("leaky2", { dependsOn: { provider: "^1.0.0" }, requires: ["svc:x"] }),
+        module: trackingModule("leaky2", log, {
+          onInstall: () => {
+            throw new Error("leaky2 boom");
+          },
+        }),
+      },
+    ];
+
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    expect(result.loaded.map((plugin) => plugin.id)).toEqual(["provider"]);
+    expect(result.failed.map((plugin) => plugin.id)).toEqual(["leaky2"]);
+
+    // Before the fix: leaky2's grant of svc:x (obtained before its onInstall
+    // threw) stayed live forever, even though leaky2 itself is reported as
+    // failed and absent from `loaded`.
+    expect(broker.isGranted("leaky2", "svc:x")).toBe(false);
+  });
+
+  it("unregisters a provider registration made earlier in the same failed load attempt, freeing the capability id for another plugin", async () => {
+    const log: string[] = [];
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        // Declares two provides, but only implements the first — the second
+        // iteration throws mid-loop, after cap:a was already registered.
+        manifest: manifest("leaky", { provides: ["cap:a", "cap:b"] }),
+        module: trackingModule("leaky", log, { provides: { "cap:a": () => "impl-a" } }),
+      },
+    ];
+
+    const result = expectOk(await loadPlugins(definitions, broker));
+    expect(result.loaded).toHaveLength(0);
+    expect(result.failed.map((plugin) => plugin.id)).toEqual(["leaky"]);
+
+    // Before the fix: "cap:a" stayed permanently registered to "leaky" (a
+    // plugin the loader itself reports as failed), so no other plugin —
+    // including a corrected retry under a different id — could ever
+    // register it again for the lifetime of the broker.
+    const registerResult = broker.registerProvider("someone-else", "cap:a", () => "impl-other");
+    expect(isErr(registerResult)).toBe(false);
+  });
+});
+
 describe("loadPlugins — error isolation (feature #10): a failing plugin cannot crash the kernel or unrelated plugins", () => {
   it("a plugin that throws in onEnable results in only that plugin (and its dependents) being marked failed", async () => {
     const log: string[] = [];

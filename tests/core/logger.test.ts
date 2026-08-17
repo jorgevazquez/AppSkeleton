@@ -186,6 +186,21 @@ describe("createLogger — secret redaction never emits a secret-like field's va
 
     expect(raw()).not.toContain(secretValue);
   });
+
+  it("security regression: redacts a secret-like object passed as a printf-style interpolation value, not just the first argument", () => {
+    const { logger, raw, lines } = makeLogger();
+
+    // Pino's documented printf-style calling convention: a string template
+    // as the first argument, with later arguments supplying %j/%o/%s
+    // placeholders. Only the first ("merging object") argument used to be
+    // walked for redaction, so a secret-bearing object passed this way
+    // reached the emitted line untouched.
+    logger.info("config loaded: %j", { apiKey: secretValue });
+
+    expect(raw()).not.toContain(secretValue);
+    const [line] = lines();
+    expect(line?.msg).toContain(REDACTED_PLACEHOLDER);
+  });
 });
 
 describe("redactSecrets — direct unit coverage of the redaction utility", () => {
@@ -222,8 +237,32 @@ describe("redactSecrets — direct unit coverage of the redaction utility", () =
     expect(redactSecrets({ date })).toEqual({ date });
   });
 
-  it("respects a custom toJSON on a nested value instead of flattening it", () => {
+  it("evaluates a benign custom toJSON and redacts its (already-safe) output", () => {
     const custom = { toJSON: () => "CUSTOM_JSON" };
-    expect(redactSecrets({ custom })).toEqual({ custom });
+    expect(redactSecrets({ custom })).toEqual({ custom: "CUSTOM_JSON" });
+  });
+
+  it("security regression: redacts a secret-like field inside a custom toJSON()'s output", () => {
+    // A class-shaped value (e.g. a config/connection-string wrapper) whose
+    // own toJSON() returns an object containing a secret-like field. Pino
+    // calls toJSON() during serialization regardless of what this module
+    // does, so leaving such a value untouched (the pre-fix behavior) let
+    // the secret reach the emitted log line in the clear.
+    class ConfigWrapper {
+      toJSON() {
+        return { apiKey: "sk-live-should-not-leak", host: "db.internal" };
+      }
+    }
+    const redacted = redactSecrets({ config: new ConfigWrapper() }) as unknown as {
+      config: { apiKey: string; host: string };
+    };
+    expect(redacted.config).toEqual({ apiKey: REDACTED_PLACEHOLDER, host: "db.internal" });
+  });
+
+  it("leaves known-safe built-ins with their own toJSON (Date) untouched, not evaluated+redacted", () => {
+    const date = new Date(0);
+    const redacted = redactSecrets({ date }) as { date: Date };
+    expect(redacted.date).toBeInstanceOf(Date);
+    expect(redacted.date).toEqual(date);
   });
 });

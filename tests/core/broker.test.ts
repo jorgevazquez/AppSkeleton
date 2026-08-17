@@ -439,3 +439,117 @@ describe("CapabilityBroker — audit trail (feature #11)", () => {
     }).not.toThrow();
   });
 });
+
+describe("CapabilityBroker — security review regressions", () => {
+  it("security regression: an object-shaped handle cannot be mutated to hijack the capability for every other consumer", () => {
+    const implementation = { query: (sql: string) => `ran: ${sql}` };
+    const { broker, capabilityId } = grantedSetup(implementation);
+
+    broker.declareRequirement("attacker", capabilityId);
+    expectOk(broker.grant("attacker", capabilityId));
+    const attackerHandle = expectOk(
+      broker.obtain<{ query: (sql: string) => string }>("attacker", capabilityId),
+    );
+
+    expect(() => {
+      (attackerHandle as unknown as Record<string, unknown>)["query"] = () => "HIJACKED";
+    }).toThrow(TypeError);
+    expect(() => {
+      delete (attackerHandle as unknown as Record<string, unknown>)["query"];
+    }).toThrow(TypeError);
+    expect(() => {
+      Object.setPrototypeOf(attackerHandle, null);
+    }).toThrow(TypeError);
+
+    // The shared underlying implementation, and every other consumer's
+    // independently-obtained handle, must be completely unaffected.
+    expect(implementation.query("select 1")).toBe("ran: select 1");
+    broker.declareRequirement("victim", capabilityId);
+    expectOk(broker.grant("victim", capabilityId));
+    const victimHandle = expectOk(
+      broker.obtain<{ query: (sql: string) => string }>("victim", capabilityId),
+    );
+    expect(victimHandle.query("select 2")).toBe("ran: select 2");
+  });
+
+  it("security regression: a function-shaped handle cannot have properties attached/mutated on the shared target", () => {
+    const implementation = Object.assign((n: number) => n * 2, { label: "doubler" });
+    const { broker, capabilityId } = grantedSetup(implementation);
+
+    broker.declareRequirement("attacker", capabilityId);
+    expectOk(broker.grant("attacker", capabilityId));
+    const handle = expectOk(
+      broker.obtain<((n: number) => number) & { label: string }>("attacker", capabilityId),
+    );
+
+    expect(() => {
+      (handle as unknown as Record<string, unknown>)["label"] = "HIJACKED";
+    }).toThrow(TypeError);
+    expect(implementation.label).toBe("doubler");
+  });
+
+  it("security regression: repeated grant() does not orphan the earlier grant record — revoke() kills every handle obtained under either", () => {
+    const broker = createCapabilityBroker();
+    const pluginId = "wiki";
+    const capabilityId = "db:query";
+    broker.declareRequirement(pluginId, capabilityId);
+    expectOk(broker.registerProvider("database-mysql", capabilityId, () => "ok"));
+
+    expectOk(broker.grant(pluginId, capabilityId));
+    const firstHandle = expectOk(broker.obtain<() => string>(pluginId, capabilityId));
+
+    // A second, redundant grant() call (e.g. a retried operator authorization)
+    // must not mint a fresh record that leaves the first handle un-revokable.
+    expectOk(broker.grant(pluginId, capabilityId));
+    const secondHandle = expectOk(broker.obtain<() => string>(pluginId, capabilityId));
+
+    broker.revoke(pluginId, capabilityId);
+
+    expect(() => firstHandle()).toThrow(CapabilityDeniedError);
+    expect(() => secondHandle()).toThrow(CapabilityDeniedError);
+    expect(broker.isGranted(pluginId, capabilityId)).toBe(false);
+  });
+
+  it("security regression: registerProvider() records an audit entry on both success and hijack-denial", () => {
+    const auditSink = createInMemoryAuditSink();
+    const broker = createCapabilityBroker({ auditSink });
+
+    expectOk(broker.registerProvider("database-mysql", "db:query", () => "ok"));
+    const registeredEntries = auditSink.query({ outcome: "registered" });
+    expect(registeredEntries).toHaveLength(1);
+    expect(registeredEntries[0]?.actor).toBe("database-mysql");
+    expect(registeredEntries[0]?.target).toBe("db:query");
+
+    const conflict = broker.registerProvider("evil-plugin", "db:query", () => "hijacked");
+    expect(isErr(conflict)).toBe(true);
+    const deniedEntries = auditSink.query({ outcome: "denied", actor: "evil-plugin" });
+    expect(deniedEntries).toHaveLength(1);
+    expect(deniedEntries[0]?.target).toBe("db:query");
+  });
+
+  it("unregisterProvider() removes a plugin's own registration and records an audit entry", () => {
+    const auditSink = createInMemoryAuditSink();
+    const broker = createCapabilityBroker({ auditSink });
+    expectOk(broker.registerProvider("leaky", "cap:a", () => "impl"));
+
+    broker.unregisterProvider("leaky", "cap:a");
+
+    // The capability id is free again for a different (or the same) provider.
+    expectOk(broker.registerProvider("someone-else", "cap:a", () => "other-impl"));
+    const unregisteredEntries = auditSink.query({ outcome: "unregistered" });
+    expect(unregisteredEntries).toHaveLength(1);
+    expect(unregisteredEntries[0]?.actor).toBe("leaky");
+  });
+
+  it("unregisterProvider() is a no-op when called by a plugin that is not the current provider", () => {
+    const broker = createCapabilityBroker();
+    expectOk(broker.registerProvider("alpha", "cap:a", () => "impl"));
+
+    broker.unregisterProvider("someone-else", "cap:a");
+
+    // alpha's registration must survive — a failing plugin must never be
+    // able to clear a *different* plugin's already-successful registration.
+    const conflict = broker.registerProvider("beta", "cap:a", () => "other");
+    expect(isErr(conflict)).toBe(true);
+  });
+});

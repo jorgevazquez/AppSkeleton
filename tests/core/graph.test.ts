@@ -256,6 +256,49 @@ describe("resolveLoadOrder — circular dependency", () => {
   });
 });
 
+describe("resolveLoadOrder — security review regressions", () => {
+  it("security regression: a long but valid (acyclic) dependency chain does not crash resolveLoadOrder with a stack overflow", () => {
+    const depth = 20_000;
+    const manifests: PluginManifest[] = [];
+    for (let i = 0; i < depth; i += 1) {
+      const dependsOn = i + 1 < depth ? { [`p${i + 1}`]: "^1.0.0" } : {};
+      manifests.push(manifest(`p${i}`, "1.0.0", dependsOn));
+    }
+
+    // The old recursive findCycle() blew the call stack well under this
+    // depth (observed break point ~5,000 on the machine/Node version this
+    // was found on) even though the chain is perfectly valid and acyclic —
+    // resolveLoadOrder() is documented to never throw.
+    expect(() => resolveLoadOrder(manifests)).not.toThrow();
+
+    const order = expectOk(resolveLoadOrder(manifests));
+    expect(order[0]).toBe(`p${depth - 1}`); // leaf (no deps) loads first
+    expect(order[order.length - 1]).toBe("p0"); // root loads last
+    expect(order).toHaveLength(depth);
+  });
+
+  it("security regression: a wide dependency graph (many plugins sharing one common dependency) resolves in near-linear, not quadratic, time", () => {
+    const width = 20_000;
+    const manifests: PluginManifest[] = [manifest("root", "1.0.0")];
+    for (let i = 0; i < width; i += 1) {
+      manifests.push(manifest(`dependent-${i}`, "1.0.0", { root: "^1.0.0" }));
+    }
+
+    const start = performance.now();
+    const order = expectOk(resolveLoadOrder(manifests));
+    const elapsedMs = performance.now() - start;
+
+    expect(order).toHaveLength(width + 1);
+    expect(order[0]).toBe("root");
+    // The pre-fix O(n^2) ready-queue scan took well over a second at this
+    // width (~1.3s measured during the security review); the binary-search
+    // insertion fix should comfortably finish in well under this bound.
+    // Generous on purpose to avoid flaking on a slow CI machine while still
+    // clearly catching a regression back to the linear-scan behavior.
+    expect(elapsedMs).toBeLessThan(800);
+  });
+});
+
 describe("resolveLoadOrder — empty graph", () => {
   it("returns an empty load order for no manifests", () => {
     expect(expectOk(resolveLoadOrder([]))).toEqual([]);

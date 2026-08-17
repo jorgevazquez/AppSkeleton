@@ -138,49 +138,91 @@ function findCycle(graph: DependencyGraph): string[] | null {
     state.set(id, UNVISITED);
   }
 
-  function visit(id: string, stack: string[]): string[] | null {
-    state.set(id, IN_PROGRESS);
-    stack.push(id);
-
+  function dependencyIdsOf(id: string): string[] {
     const node = graph.nodes.get(id);
-    const dependencyIds = node
-      ? Object.keys(node.dependsOn).sort((a, b) => a.localeCompare(b))
-      : [];
-
-    for (const dependencyId of dependencyIds) {
-      if (!graph.nodes.has(dependencyId)) {
-        // Unresolvable edges are reported separately (missing_dependency) and
-        // never form part of a cycle.
-        continue;
-      }
-      const dependencyState = state.get(dependencyId);
-      if (dependencyState === IN_PROGRESS) {
-        const cycleStart = stack.indexOf(dependencyId);
-        return [...stack.slice(cycleStart), dependencyId];
-      }
-      if (dependencyState === UNVISITED) {
-        const found = visit(dependencyId, stack);
-        if (found) {
-          return found;
-        }
-      }
+    if (!node) {
+      return [];
     }
-
-    stack.pop();
-    state.set(id, DONE);
-    return null;
+    // Unresolvable edges are reported separately (missing_dependency) and
+    // never form part of a cycle, so they're filtered out here too.
+    return Object.keys(node.dependsOn)
+      .filter((dependencyId) => graph.nodes.has(dependencyId))
+      .sort((a, b) => a.localeCompare(b));
   }
 
-  for (const id of sortedIds) {
-    if (state.get(id) === UNVISITED) {
-      const cycle = visit(id, []);
-      if (cycle) {
-        return cycle;
+  // Iterative depth-first search with an explicit frame stack, rather than
+  // recursing once per dependency-chain hop. A recursive visit() would blow
+  // the JS call stack on a long-but-valid (acyclic) dependency chain — an
+  // ordinary, attacker-free plugin set can have hundreds or thousands of
+  // plugins chained through depends_on, and resolveLoadOrder() is documented
+  // to "never throw", which a stack overflow would violate.
+  for (const start of sortedIds) {
+    if (state.get(start) !== UNVISITED) {
+      continue;
+    }
+
+    const path: string[] = [start];
+    const frames: { id: string; deps: string[]; index: number }[] = [
+      { id: start, deps: dependencyIdsOf(start), index: 0 },
+    ];
+    state.set(start, IN_PROGRESS);
+
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1];
+      if (!frame) {
+        break;
+      }
+      if (frame.index >= frame.deps.length) {
+        path.pop();
+        state.set(frame.id, DONE);
+        frames.pop();
+        continue;
+      }
+
+      const dependencyId = frame.deps[frame.index];
+      frame.index += 1;
+      if (dependencyId === undefined) {
+        continue;
+      }
+
+      const dependencyState = state.get(dependencyId);
+      if (dependencyState === IN_PROGRESS) {
+        const cycleStart = path.indexOf(dependencyId);
+        return [...path.slice(cycleStart), dependencyId];
+      }
+      if (dependencyState === UNVISITED) {
+        state.set(dependencyId, IN_PROGRESS);
+        path.push(dependencyId);
+        frames.push({ id: dependencyId, deps: dependencyIdsOf(dependencyId), index: 0 });
       }
     }
   }
 
   return null;
+}
+
+/**
+ * Insert `value` into `sortedArr` (already sorted lexicographically),
+ * keeping it sorted, using binary search to find the insertion point
+ * instead of a linear scan. `Array.prototype.splice`'s own element shift is
+ * still O(n), but avoiding an O(n) comparator-callback scan to *find* that
+ * point first is what keeps a wide dependency graph (many plugins that all
+ * depend on one common plugin, so many ids become ready in the same round)
+ * out of near-quadratic territory.
+ */
+function insertSorted(sortedArr: string[], value: string): void {
+  let low = 0;
+  let high = sortedArr.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    const candidate = sortedArr[mid] as string;
+    if (candidate.localeCompare(value) <= 0) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  sortedArr.splice(low, 0, value);
 }
 
 /**
@@ -230,12 +272,7 @@ function topologicalSort(graph: DependencyGraph): string[] {
       inDegree.set(dependent, remaining);
       if (remaining === 0) {
         // Insert keeping `ready` sorted, so the next shift() stays deterministic.
-        const insertAt = ready.findIndex((id) => id.localeCompare(dependent) > 0);
-        if (insertAt === -1) {
-          ready.push(dependent);
-        } else {
-          ready.splice(insertAt, 0, dependent);
-        }
+        insertSorted(ready, dependent);
       }
     }
   }

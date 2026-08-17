@@ -255,6 +255,17 @@ export async function loadPlugins(
       continue;
     }
 
+    // Tracks capabilities this plugin's own load attempt has already
+    // mutated shared broker state for, so a failure partway through this
+    // plugin's own sequence can be rolled back without touching any other
+    // plugin's state. Without this, a plugin that fails after successfully
+    // registering a provider or obtaining a grant would leave that
+    // registration/grant permanently live even though the plugin itself is
+    // recorded as failed — see feature #10's isolation contract and the
+    // kernel security review that found this gap.
+    const registeredThisAttempt: string[] = [];
+    const grantedThisAttempt: string[] = [];
+
     try {
       broker.declareRequirements(id, manifest.capabilities.requires);
 
@@ -271,6 +282,7 @@ export async function loadPlugins(
         if (isErr(registerResult)) {
           throw registerResult.error;
         }
+        registeredThisAttempt.push(capabilityId);
       }
 
       for (const capabilityId of manifest.capabilities.requires) {
@@ -279,6 +291,7 @@ export async function loadPlugins(
           if (isErr(grantResult)) {
             throw grantResult.error;
           }
+          grantedThisAttempt.push(capabilityId);
         }
       }
 
@@ -293,6 +306,12 @@ export async function loadPlugins(
 
       loaded.push({ id, manifest, module, context });
     } catch (cause) {
+      for (const capabilityId of registeredThisAttempt) {
+        broker.unregisterProvider(id, capabilityId);
+      }
+      for (const capabilityId of grantedThisAttempt) {
+        broker.revoke(id, capabilityId);
+      }
       logger.error(
         { plugin: id, err: cause },
         `Plugin "${id}" failed to load; isolated from unrelated plugins — load continues.`,
