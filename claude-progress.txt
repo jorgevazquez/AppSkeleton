@@ -316,3 +316,22 @@ architecture and feature_list.json for the build backlog (120 features).
 - DB_USER/DB_PASSWORD/DB_NAME have no schema defaults on purpose, unlike .env.example's documented DB_USER=appskeleton/DB_PASSWORD=change-me/DB_NAME=appskeleton — those are local-dev convenience values for a human copying .env.example to .env, not safe values to bake into the zod schema itself (spec.md: secrets never hard-coded). Every test that needs a valid config passes these explicitly via the env option, matching feature #2's established convention of never relying on ambient process.env in tests.
 - Verified empirically (manual node --input-type=module scripts against the live docker-compose container, both before writing tests and via the actual test suite) that: (1) mysql2's createPool() never opens a connection eagerly — safe to unit-test pool construction with zero real I/O; (2) this repo's mysql:8.4 container has TLS available out of the box via an auto-generated self-signed cert, so 'optional TLS' could be integration-tested for real (encrypted cipher negotiated, confirmed via SHOW STATUS LIKE 'Ssl_cipher') rather than only asserting on the ssl option object being present.
 - Next natural consumers: feature #19 (migration runner) and #20 (db:query capability via kysely) both depend on #18 and will need to import createDbPoolFromEnv() (or createDbPool()+loadDbConfig() separately) to get a real pool to build kysely's Kysely<Database> instance over — createDbPool() takes a plain DbConfig so kysely wiring doesn't have to re-derive config itself. The plugin's own index.ts lifecycle entry point (onInstall calling createDbPoolFromEnv() and stashing the pool for db:query/db:transaction to use) still doesn't exist yet; that's kernel-lifecycle wiring properly scoped to #19-21, not this feature, per feature #17's notes.
+
+---
+
+## 2026-08-16 20:14 — Feature #31: rbac plugin manifest declaring rbac:check and rbac:manage capabilities
+
+### What was done:
+- Created src/plugins/rbac/plugin.json (id: rbac, version 0.1.0, depends_on: {}, capabilities.provides: [rbac:check, rbac:manage], capabilities.requires: [], entry_point: index.ts), following the exact shape of database-mysql's plugin.json (feature 15's conventions predate docs/plugin-conventions.md, which doesn't exist yet since feature 15 itself isn't done — so 'conventions from feature 15' was interpreted as the precedent set by the only other shipped manifest, database-mysql, plus spec.md's Plugin Manifest section and src/core/manifest.ts's zod schema/JSDoc).
+- Added tests/plugins/rbac/manifest.test.ts (3 tests) mirroring tests/plugins/database-mysql/manifest.test.ts: plugin is discoverable via scanPluginDirectories, its manifest passes validateManifest(), and it declares exactly rbac:check + rbac:manage as provides.
+
+### Testing:
+- Ran the new test file alone (npx vitest run tests/plugins/rbac/manifest.test.ts): 3/3 pass.
+- Ran full suite (npm test): 267/267 pass (264 pre-existing + 3 new), no regressions.
+- Ran npm run build (tsc strict) and npm run lint (eslint): both clean.
+- Manually confirmed via the manifest schema that id/capabilities/entry_point satisfy PLUGIN_ID_PATTERN, CAPABILITY_PATTERN, and ENTRY_POINT_PATTERN; validateManifest() in the test asserts isOk(result) === true.
+
+### Notes:
+- depends_on is {} and capabilities.requires is [] for now — rbac doesn't consume db:query yet since persistence (feature 32, Core RBAC data model) hasn't landed; adding a database-mysql dependency here would be speculative and get this manifest out of sync with what the plugin actually calls. Future features (32+) should add depends_on/requires as real usage is implemented, not preemptively.
+- entry_point: "index.ts" is declared but the file doesn't exist yet (same pattern as database-mysql's plugin.json, which also declares index.ts without having created it) — validateManifest() only checks the path shape via ENTRY_POINT_PATTERN, not filesystem existence, so this is consistent with the existing precedent.
+- Feature 15 (docs/plugin-conventions.md) is still passes:false — there's no written conventions doc yet to check this manifest against. This feature's manifest shape was instead validated directly against src/core/manifest.ts's zod schema (the actual source of truth) and matched to database-mysql's plugin.json as the working precedent. Worth flagging: once feature 15 lands, it should be cross-checked against this file too.
