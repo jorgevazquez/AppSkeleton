@@ -354,6 +354,10 @@ def run_parallel_batch(project_dir: Path, batch: list[dict], passing: int, total
     """Run a batch of features in parallel using worktrees. Returns list of completed feature IDs."""
     worktrees = {}  # feature_id -> worktree_path
     procs = {}      # feature_id -> Popen
+    log_files = {}  # feature_id -> (path, open file handle)
+
+    logs_dir = project_dir / ".autopilot-logs"
+    logs_dir.mkdir(exist_ok=True)
 
     # 1. Create worktrees and start processes
     for feature in batch:
@@ -379,12 +383,25 @@ def run_parallel_batch(project_dir: Path, batch: list[dict], passing: int, total
         if model:
             cmd.extend(["--model", model])
 
-        print(f"  Starting feature #{fid} in {wt_path}...")
+        log_path = logs_dir / f"feature-{fid}.log"
+        log_fh = open(log_path, "w")
+        log_files[fid] = (log_path, log_fh)
+
+        print(f"  Starting feature #{fid} in {wt_path}... (log: {log_path})")
+        # stdout/stderr go straight to a file rather than subprocess.PIPE: with
+        # PIPE, nothing reads these pipes until the drain loop below reaches
+        # this process, and the OS pipe buffer (64KB) fills fast once several
+        # of these run concurrently and stream verbose tool output -- the
+        # child then blocks on write() while it waits its turn. That's what
+        # was silently killing parallel batches (see claude-progress.txt,
+        # 2026-08-17 diagnostic entry): all 3 sessions for features #13/#19/#20
+        # started together and died ~40s in with no stderr, which is exactly
+        # this pipe-deadlock pattern, not a real per-feature failure.
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
             text=True,
             cwd=str(wt_path.resolve()),
         )
@@ -400,21 +417,24 @@ def run_parallel_batch(project_dir: Path, batch: list[dict], passing: int, total
     print(f"  Waiting for {len(procs)} parallel sessions...")
     completed_ids = []
     for fid, proc in procs.items():
+        log_path, log_fh = log_files[fid]
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
+            log_fh.close()
+            tail = log_path.read_text(errors="replace").strip().split("\n")
             if proc.returncode == 0:
                 print(f"  ✅ Feature #{fid} session finished")
-                output_lines = stdout.strip().split("\n") if stdout else []
-                for line in output_lines[-5:]:
+                for line in tail[-5:]:
                     print(f"    {line}")
             else:
-                print(f"  ❌ Feature #{fid} session failed (exit {proc.returncode})")
-                if stderr:
-                    print(f"    {stderr[:300]}")
+                print(f"  ❌ Feature #{fid} session failed (exit {proc.returncode}), see {log_path}")
+                for line in tail[-15:]:
+                    print(f"    {line}")
         except subprocess.TimeoutExpired:
             print(f"  ⏱️ Feature #{fid} timed out, killing...")
             proc.kill()
             proc.wait()
+            log_fh.close()
 
     # 3. Merge completed branches and clean up
     for fid in list(worktrees.keys()):
