@@ -302,9 +302,36 @@ def _remove_worktree(project_dir: Path, feature_id: int):
 
 
 def _merge_worktree(project_dir: Path, feature_id: int) -> bool:
-    """Merge feature branch back into current branch. Returns True on success."""
+    """Merge feature branch back into current branch. Returns True on success.
+
+    Rebases the feature branch onto the current tip of main first. Parallel
+    batches cut every worktree's branch from the SAME base commit, so once
+    the first branch in a batch merges, later branches are stale — without
+    a rebase they reliably conflict on append-only files (claude-progress.txt)
+    even when their real code changes don't overlap at all. Rebasing right
+    before merge makes each merge apply cleanly on top of whatever already
+    landed earlier in the same batch.
+    """
     branch = f"feature-{feature_id}"
+    wt_path = project_dir / ".worktrees" / f"feature-{feature_id}"
     try:
+        main_tip = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=str(project_dir), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        rebase = subprocess.run(
+            ["git", "rebase", main_tip],
+            cwd=str(wt_path), capture_output=True, text=True,
+        )
+        if rebase.returncode != 0:
+            print(f"  [CONFLICT] Rebase onto main failed for feature #{feature_id}, aborting rebase")
+            subprocess.run(
+                ["git", "rebase", "--abort"],
+                cwd=str(wt_path), capture_output=True, text=True,
+            )
+            return False
+
         result = subprocess.run(
             ["git", "merge", "--no-ff", branch, "-m", f"merge: feature #{feature_id} from parallel run"],
             cwd=str(project_dir), capture_output=True, text=True,
