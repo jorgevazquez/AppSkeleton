@@ -52,3 +52,25 @@ architecture and feature_list.json for the build backlog (120 features).
   continue the autopilot loop or pick up in Mode A per AGENTS.md.
 - Do NOT modify feature_list.json descriptions/steps — only the `passes`
   field, via `dev-agent.py complete` / `skip`.
+
+---
+
+## 2026-08-16 17:02 — Feature #1: Core error taxonomy and Result-style types for the kernel
+
+### What was done:
+- Added src/core/errors.ts: abstract AppError base class (extends Error) with a stable machine-readable code, a default HTTP statusCode, a safe overridable publicMessage (separate from the internal Error#message), optional structured details, and an internal-only cause (never serialized). Four concrete subclasses: ValidationError (400/VALIDATION_ERROR), ConfigError (500/CONFIG_ERROR), PluginLoadError (500/PLUGIN_LOAD_ERROR), CapabilityDeniedError (403/CAPABILITY_DENIED), each with its own safe default public message.
+- toJSON({ includeStack }) serializes to an API error envelope shape { code, message, details?, stack? } — stack omitted unless includeStack is explicitly passed. Added isAppError() type guard and toErrorEnvelope(error, options) to collapse any unknown thrown value (plain Error, thrown string, etc.) into a generic non-leaking INTERNAL_ERROR envelope for the kernel's top-level error isolation path.
+- Added src/core/types.ts: Result-style type (Ok<T> | Err<E>, default E = AppError) plus ok(), err(), isOk(), isErr(), unwrap(), unwrapOr(), mapResult(), mapErr() helpers for kernel operations that fail without throwing.
+
+### Testing:
+- tests/core/errors.test.ts (24 cases): per-subclass code/statusCode assertions, default public messages proven not to contain injected internal secrets/identifiers, explicit publicMessage override, internal message vs publicMessage independence, structured details round-trip, cause kept internal-only and absent from JSON.stringify output, toJSON() envelope shape exact-match with no stack key by default, stack included only when includeStack:true, toErrorEnvelope() behavior for AppError/plain Error/thrown string.
+- tests/core/result.test.ts (9 cases): ok/err construction + isOk/isErr narrowing, unwrap returning value vs throwing the wrapped error, unwrapOr fallback, mapResult/mapErr transforming the correct branch and passing the other through untouched.
+- Ran npm run build (tsc strict, incl. exactOptionalPropertyTypes/noUncheckedIndexedAccess) — clean. npm run lint (eslint) — clean. npm test (vitest) — 3 files / 33 tests passing (includes pre-existing smoke test). npx prettier --check on all new/changed files — clean.
+
+### Notes:
+- Kept AppError abstract so every thrown instance is forced through a concrete subclass with a real code; add new error kinds by extending AppError with a fixed code/statusCode and an overridden defaultPublicMessage(), not by instantiating AppError directly.
+- publicMessage is intentionally separate from Error#message: message can carry internal detail for logs (file paths, plugin ids, SQL fragments) since it is never included in toJSON(); only publicMessage/code/details cross the API boundary.
+- cause uses the native ES2022 Error cause option (supported by tsconfig lib ES2022) and is deliberately excluded from toJSON()/serialization — read it via error.cause for internal diagnostics/log correlation only.
+- Result<T, E = AppError> lives in types.ts (not errors.ts) per spec.md's directory layout, and imports AppError only for the default type parameter — no runtime coupling.
+- Gotcha for future agents: passing a variable already typed as the Result<T,E> alias into mapResult/mapErr can make TS fail to infer the callback parameter type (falls back to unknown) even though passing ok()/err() calls directly infers fine — annotate the callback parameter explicitly in that case (see result.test.ts) rather than trying to force generic type args onto ok()/err(), which only take one type parameter each.
+- Next natural consumer: feature #4 (plugin manifest zod validator) will want ValidationError; api-gateway (later) will want toErrorEnvelope()/AppError#toJSON() for its error-envelope middleware.
