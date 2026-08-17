@@ -1,0 +1,6 @@
+# claude-progress.txt is append-only (every parallel feature branch appends its own
+# entry, never edits an existing one). Parallel batches rebase each feature branch
+# onto whatever already merged, and two independent appends anchored at the same
+# trailing context otherwise show up as a content conflict even though there's
+# nothing to actually resolve -- take both sides instead of stopping to ask.
+claude-progress.txt merge=union
