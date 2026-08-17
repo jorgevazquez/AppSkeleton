@@ -1,0 +1,10 @@
+{
+  "id": "database-mysql",
+  "version": "0.1.0",
+  "depends_on": {},
+  "capabilities": {
+    "provides": ["db:query", "db:transaction", "db:migrate"],
+    "requires": []
+  },
+  "entry_point": "index.ts"
+}
