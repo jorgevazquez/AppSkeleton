@@ -143,6 +143,26 @@ export class CapabilityDeniedError extends AppError {
   }
 }
 
+/**
+ * A query or transaction run through the database-mysql plugin's db:query /
+ * db:transaction capability failed (a driver-level error such as a
+ * constraint violation, an unreachable server, or a malformed query) —
+ * never thrown for a capability *permission* problem, which is always
+ * {@link CapabilityDeniedError} instead. `message` may safely include the
+ * driver's own error text (never a query's bound parameter *values*, which
+ * mysql2/kysely keep out of the SQL text entirely — see db:query's own
+ * docs); `publicMessage` stays generic so a raw driver error never reaches
+ * an API caller.
+ */
+export class DatabaseError extends AppError {
+  readonly code = "DATABASE_ERROR";
+  readonly statusCode = 500;
+
+  protected override defaultPublicMessage(): string {
+    return "A database error occurred.";
+  }
+}
+
 /** Narrow an unknown thrown value down to the AppError taxonomy. */
 export function isAppError(error: unknown): error is AppError {
   return error instanceof AppError;

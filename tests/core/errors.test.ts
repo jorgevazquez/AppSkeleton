@@ -3,6 +3,7 @@ import {
   AppError,
   CapabilityDeniedError,
   ConfigError,
+  DatabaseError,
   PluginLoadError,
   ValidationError,
   isAppError,
@@ -66,6 +67,22 @@ describe("CapabilityDeniedError", () => {
     const error = new CapabilityDeniedError("plugin 'wiki' requested db:query without a grant");
     expect(error.publicMessage).not.toContain("wiki");
     expect(error.publicMessage).not.toContain("db:query");
+  });
+});
+
+describe("DatabaseError", () => {
+  it("carries a stable machine-readable code and status", () => {
+    const error = new DatabaseError("ER_DUP_ENTRY: Duplicate entry 'x' for key 'PRIMARY'");
+    expect(error).toBeInstanceOf(AppError);
+    expect(error.code).toBe("DATABASE_ERROR");
+    expect(error.statusCode).toBe(500);
+  });
+
+  it("has a safe default public message that does not leak driver-level detail", () => {
+    const error = new DatabaseError("ER_DUP_ENTRY: Duplicate entry 'x' for key 'PRIMARY'");
+    expect(error.publicMessage).not.toContain("ER_DUP_ENTRY");
+    expect(error.publicMessage).not.toContain("PRIMARY");
+    expect(error.publicMessage.length).toBeGreaterThan(0);
   });
 });
 
