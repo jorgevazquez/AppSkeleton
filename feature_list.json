@@ -23,7 +23,7 @@
       "Write unit tests: missing required var fails fast with a clear error; valid config loads correctly; overrides take precedence in the right order"
     ],
     "depends_on": [],
-    "passes": false
+    "passes": true
   },
   {
     "id": 3,
