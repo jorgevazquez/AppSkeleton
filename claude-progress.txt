@@ -508,3 +508,23 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Each migration runs in its own transaction (its up()/down() plus the corresponding schema_migrations row change) rather than one transaction for the whole batch — MySQL DDL implicitly commits anyway so a whole-batch transaction couldn't roll back an earlier migration's CREATE TABLE if a later one failed; per-migration transactions at least keep each migration's own DML and its tracking-row insert atomic, and a partial multi-migration up() run leaves a clean, resumable boundary (already-applied migrations stay applied, the failed one and everything after it stays pending).
 - migrate.ts deliberately does not import server/index.ts for formatFatalStartupError even though the behavior is identical — reimplemented locally so this plugin's CLI script has no dependency on the kernel bootstrap module, consistent with this plugin's other modules (pool.ts, db.ts, query-capability.ts) only ever importing from core/, never from server/.
 - Next natural consumer: feature #22 (per-plugin schema/table namespace enforcement) may want to lint migration-authored table names against the <plugin_id>_<table> convention; feature #25 (seed data) and #86 (wiki's own pages/revisions/namespaces migrations) will add real .ts files under src/plugins/*/src/migrations/ using this exact up(db)/down(db) export shape.
+## 2026-08-17 15:23 — Feature #46: Template parser/compiler: variables, conditionals, loops
+
+### What was done:
+- Added src/plugins/html-renderer/src/template.ts: a dependency-free mustache/handlebars-inspired template compiler supporting {{var}} (incl. dotted paths like {{user.name}}), {{#if}}/{{else}}/{{/if}} conditionals, and {{#each}}/{{/each}} loops over arrays and plain objects ({{this}}, {{@index}}, {{@key}}).
+- parseTemplate() tokenizes+parses source into a TemplateNode[] AST once; compileTemplate() compiles that AST into a tree of closures once and returns a CompiledTemplate whose render(context) just invokes the closures — no re-parsing or AST re-walking on repeated renders with different contexts.
+- All parse/compile failures (unclosed {{#if}}/{{#each}}, stray {{else}}/{{/if}}/{{/each}}, empty {{}}, invalid path segments, unknown block tags) return Result<T, ValidationError> per the kernel's Result convention (core/types.ts, core/errors.ts) rather than throwing.
+- Variable/if-path resolution falls back through enclosing #each scopes (Mustache-style context stack), so a loop body can reference outer variables and an outer loop's item fields.
+- Added tests/plugins/html-renderer/template.test.ts: 60 unit tests covering variable interpolation (top-level, nested, missing/null/undefined, non-string stringification), conditionals (truthy/falsy matrix incl. 0/''/NaN/empty array, else branch, 3-level nesting), loops over arrays and objects (@index/@key/this, nested loops, context-stack fallback), compile-once/render-many reuse, and structural parse-error cases.
+
+### Testing:
+- npm run build (tsc --strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes) — clean.
+- npm run lint (eslint) — clean.
+- npx prettier --check on both new files — clean (auto-formatted once).
+- npx vitest run — full suite: 25 test files / 410 tests passing (350 pre-existing + 60 new in template.test.ts), no regressions.
+
+### Notes:
+- Auto-escaping is deliberately NOT implemented here — {{var}} does a plain String(value) interpolation. Feature #47 ("Context-aware auto-escaping") owns HTML/attr/URL/JS-context escaping and layers on top of this compiler without changing its parse/compile contract; do not add escaping ad hoc in a future feature without checking #47's scope first.
+- Layouts/partials (#48/#49), an explicit raw-output helper (#50), and compiled-template caching across calls (#53) are all intentionally out of scope for this feature — see the module-level JSDoc in template.ts for the full 'deliberately out of scope' list so future agents don't duplicate or conflict with those features' designs.
+- #if truthiness intentionally treats an empty array as falsy (in addition to standard JS falsy values) since #each is the idiomatic way to branch on list contents — see the isTruthy() doc comment and the it.each truthy/falsy matrix in the tests.
+- No index.ts lifecycle entry point exists yet for html-renderer (same as rbac/database-mysql at this stage) — plugin.json's entry_point isn't wired up by any feature yet, so this stays a plain src/ module for now; a later feature will need to register render:template with the capability broker (see feature #52).
