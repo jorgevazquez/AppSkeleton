@@ -335,3 +335,21 @@ architecture and feature_list.json for the build backlog (120 features).
 - depends_on is {} and capabilities.requires is [] for now — rbac doesn't consume db:query yet since persistence (feature 32, Core RBAC data model) hasn't landed; adding a database-mysql dependency here would be speculative and get this manifest out of sync with what the plugin actually calls. Future features (32+) should add depends_on/requires as real usage is implemented, not preemptively.
 - entry_point: "index.ts" is declared but the file doesn't exist yet (same pattern as database-mysql's plugin.json, which also declares index.ts without having created it) — validateManifest() only checks the path shape via ENTRY_POINT_PATTERN, not filesystem existence, so this is consistent with the existing precedent.
 - Feature 15 (docs/plugin-conventions.md) is still passes:false — there's no written conventions doc yet to check this manifest against. This feature's manifest shape was instead validated directly against src/core/manifest.ts's zod schema (the actual source of truth) and matched to database-mysql's plugin.json as the working precedent. Worth flagging: once feature 15 lands, it should be cross-checked against this file too.
+
+---
+
+## 2026-08-16 20:36 — Feature #45: html-renderer plugin manifest declaring the render:template capability
+
+### What was done:
+- Created src/plugins/html-renderer/plugin.json following the rbac/database-mysql convention: id "html-renderer", version "0.1.0", empty depends_on, capabilities.provides=["render:template"] (its sole capability, per spec.md section 3 — a dependency-free templating engine with no capabilities of its own to require), capabilities.requires=[], entry_point "index.ts".
+- Added tests/plugins/html-renderer/manifest.test.ts mirroring tests/plugins/rbac/manifest.test.ts and tests/plugins/database-mysql/manifest.test.ts: asserts the plugin is discoverable via scanPluginDirectories() against the real src/plugins root, that validateManifest() accepts it (id/entry_point checks), and that capabilities.provides is exactly ["render:template"] with an empty requires list.
+
+### Testing:
+- npx vitest run tests/plugins/html-renderer: 3/3 new tests pass, and the plugin-registry scan log line changed from found:2/skipped:4 to found:3/skipped:3, confirming html-renderer is now discovered.
+- npx vitest run (full suite): 18 files / 270 tests pass (267 pre-existing + 3 new), no regressions.
+- npm run build (tsc strict) — clean. npm run lint (eslint) — clean. npx prettier --check on both new files — clean, no reformatting needed.
+
+### Notes:
+- api-gateway, plugin-builder, and wiki plugin directories still have no plugin.json (each still logs "missing_manifest" during scans) — that's expected, they're scaffolded-but-empty per their own README.md files and covered by later features (#48/#52/#... per feature_list.json), not this one.
+- Followed the exact manifest shape used by rbac/database-mysql (empty depends_on object, entry_point "index.ts") since html-renderer has no plugin dependencies per spec.md section 3 ("dependency-free templating engine") — only api-gateway/wiki later declare requires on render:template, not html-renderer itself providing it.
+- validateManifest()'s CapabilitiesSchema.strict() + duplicate-capability check meant a single-element provides array was sufficient; no requires entries needed since the renderer doesn't consume any other plugin's capability.
