@@ -1,0 +1,10 @@
+{
+  "id": "api-gateway",
+  "version": "0.1.0",
+  "depends_on": {},
+  "capabilities": {
+    "provides": ["http:route"],
+    "requires": ["rbac:check", "render:template"]
+  },
+  "entry_point": "index.ts"
+}
