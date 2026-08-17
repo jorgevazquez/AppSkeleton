@@ -1,0 +1,10 @@
+{
+  "id": "html-renderer",
+  "version": "0.1.0",
+  "depends_on": {},
+  "capabilities": {
+    "provides": ["render:template"],
+    "requires": []
+  },
+  "entry_point": "index.ts"
+}
