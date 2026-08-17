@@ -234,3 +234,16 @@ architecture and feature_list.json for the build backlog (120 features).
 - Design choice: payload type-erasure happens internally (Map<string, Set<EventHandler<unknown>>>) via an `as unknown as EventHandler<unknown>` cast at the subscribe() boundary, documented inline — this is what lets a single Map hold handlers with different payload types per event key without ever declaring a public or internal `any`. Safety is structural: publish() only ever looks up and calls handlers under the same event key they were registered with, so the erased type is never actually violated at a call site.
 - publish() is async and awaits each handler in turn (not Promise.allSettled/fire-and-forget) so a caller that wants read-your-own-write style ordering (e.g. "publish this and know every reactive side effect has settled before continuing") can rely on it, matching the loader.ts pattern of awaiting lifecycle hooks in sequence. Errors are still fully isolated per-handler regardless.
 - Feature #12 (kernel bootstrap) is the only feature in feature_list.json that depends on #9 — it will need to construct one createEventBus() instance and thread it through config/logger/registry/loader/audit sink wiring the same way loader.ts already threads the capability broker.
+
+---
+
+## 2026-08-16 18:10 — Feature #17: database-mysql plugin manifest declaring db:query, db:transaction, db:migrate capabilities
+
+### What was done:
+- Added src/plugins/database-mysql/plugin.json: id "database-mysql", version "0.1.0" (matches package.json), depends_on {} (foundational plugin, no runtime dependency on other plugins), capabilities.provides ["db:query", "db:transaction", "db:migrate"] per this feature's title, capabilities.requires [] (nothing else exists yet for it to depend on), entry_point "index.ts" per spec.md's directory layout (the lifecycle module itself is built by later features 18-27, e.g. #18 connection pool, #19 migration runner, #20/#21 the query/transaction capability implementations — this feature is manifest-only).
+
+### Testing:
+- npm run build (tsc strict) clean, npm run lint (eslint) clean, npx prettier --check on both new files clean, npm test (vitest) — 12 files / 192 tests passing (189 pre-existing + 3 new), zero regressions.
+
+### Notes:
+- entry_point points at "index.ts", which does not exist on disk yet — this is expected and correct: validateManifest() only checks entry_point's path grammar (relative, no traversal, valid extension), never that the file exists; the real index.ts lifecycle module lands with features #18-21.
