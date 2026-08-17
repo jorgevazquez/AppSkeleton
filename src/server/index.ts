@@ -69,6 +69,7 @@ import { createCapabilityBroker, type CapabilityBroker } from "../core/broker.js
 import { loadCoreConfig, type CoreConfig } from "../core/config.js";
 import { isAppError, PluginLoadError } from "../core/errors.js";
 import { createEventBus, type EventBus } from "../core/events.js";
+import { introspectKernel, type KernelIntrospectionReport } from "../core/introspect.js";
 import {
   loadPlugins,
   type PluginDefinition,
@@ -77,6 +78,7 @@ import {
 } from "../core/loader.js";
 import { createLogger, type Logger } from "../core/logger.js";
 import { validateManifest, type PluginManifest } from "../core/manifest.js";
+import { createPluginStatusTracker, type PluginStatusTracker } from "../core/plugin-status.js";
 import { scanPluginDirectories, type PluginScanEntry } from "../core/registry.js";
 import { isErr } from "../core/types.js";
 
@@ -89,6 +91,21 @@ export interface Kernel {
   readonly eventBus: EventBus;
   /** The result of discovering and loading every valid plugin — see loader.ts's `PluginLoadResult`. */
   readonly plugins: PluginLoadResult;
+  /**
+   * Tracks which plugins are administratively disabled (feature #13's seam
+   * for feature #16's `kernel.disablePlugin()`/`enablePlugin()`) — see
+   * plugin-status.ts. Starts empty at boot; nothing in this feature disables
+   * a plugin on its own.
+   */
+  readonly pluginStatus: PluginStatusTracker;
+  /**
+   * Kernel introspection API (feature #13, spec.md: "report loaded plugins,
+   * their capabilities, and load status"): every plugin's id, version,
+   * status (`loaded`/`failed`/`disabled`), and currently-granted
+   * capabilities, read live from `broker`/`plugins`/`pluginStatus` — see
+   * introspect.ts's `introspectKernel()`.
+   */
+  introspect(): KernelIntrospectionReport;
 }
 
 export interface BootstrapKernelOptions {
@@ -201,6 +218,7 @@ export async function bootstrapKernel(options: BootstrapKernelOptions = {}): Pro
   const auditSink = createInMemoryAuditSink();
   const broker = createCapabilityBroker({ auditSink });
   const eventBus = createEventBus();
+  const pluginStatus = createPluginStatusTracker();
 
   const definitions = await discoverPluginDefinitions(pluginsRoot, logger);
 
@@ -208,12 +226,13 @@ export async function bootstrapKernel(options: BootstrapKernelOptions = {}): Pro
   if (isErr(loadResult)) {
     throw loadResult.error;
   }
+  const plugins = loadResult.value;
 
   logger.info(
     {
       pluginsRoot,
-      loaded: loadResult.value.loaded.map((plugin) => plugin.id),
-      failed: loadResult.value.failed.map((plugin) => ({
+      loaded: plugins.loaded.map((plugin) => plugin.id),
+      failed: plugins.failed.map((plugin) => ({
         id: plugin.id,
         skipped: plugin.skipped,
       })),
@@ -221,7 +240,16 @@ export async function bootstrapKernel(options: BootstrapKernelOptions = {}): Pro
     "Kernel bootstrap complete.",
   );
 
-  return { config, logger, broker, auditSink, eventBus, plugins: loadResult.value };
+  return {
+    config,
+    logger,
+    broker,
+    auditSink,
+    eventBus,
+    plugins,
+    pluginStatus,
+    introspect: () => introspectKernel(plugins, broker, pluginStatus),
+  };
 }
 
 export interface BuildServerOptions {

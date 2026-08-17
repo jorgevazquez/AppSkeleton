@@ -19,7 +19,8 @@
     "test:watch": "vitest",
     "migrate": "tsx src/plugins/database-mysql/src/migrate.ts up",
     "migrate:down": "tsx src/plugins/database-mysql/src/migrate.ts down",
-    "create-plugin": "tsx src/plugins/plugin-builder/src/cli.ts create"
+    "create-plugin": "tsx src/plugins/plugin-builder/src/cli.ts create",
+    "introspect": "tsx src/cli/introspect.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.0",

@@ -198,6 +198,120 @@ describe("bootstrapKernel", () => {
   });
 });
 
+describe("bootstrapKernel — kernel.introspect()", () => {
+  it("reports every discovered plugin's id, version, status, and granted capabilities end-to-end", async () => {
+    const pluginsRoot = trackedTempRoot();
+    writePluginDir(
+      pluginsRoot,
+      "greeter",
+      {
+        id: "greeter",
+        version: "1.0.0",
+        depends_on: {},
+        capabilities: { provides: ["demo:greet"], requires: [] },
+        entry_point: "index.js",
+      },
+      { "index.js": 'export const provides = {\n  "demo:greet": () => "hello",\n};\n' },
+    );
+    writePluginDir(
+      pluginsRoot,
+      "consumer",
+      {
+        id: "consumer",
+        version: "1.0.0",
+        depends_on: { greeter: "^1.0.0" },
+        capabilities: { provides: [], requires: ["demo:greet"] },
+        entry_point: "index.js",
+      },
+      { "index.js": "export {};\n" },
+    );
+    writePluginDir(pluginsRoot, "broken", {
+      id: "broken",
+      version: "1.0.0",
+      depends_on: {},
+      capabilities: { provides: [], requires: [] },
+      entry_point: "index.js",
+    });
+    // Note: "broken/index.js" is never written, so it fails to import().
+
+    const kernel = await bootstrapKernel({ pluginsRoot, env: {} });
+    const report = kernel.introspect();
+
+    const greeter = report.plugins.find((plugin) => plugin.id === "greeter");
+    const consumer = report.plugins.find((plugin) => plugin.id === "consumer");
+    const broken = report.plugins.find((plugin) => plugin.id === "broken");
+
+    expect(greeter).toMatchObject({ id: "greeter", version: "1.0.0", status: "loaded" });
+    expect(consumer).toMatchObject({
+      id: "consumer",
+      version: "1.0.0",
+      status: "loaded",
+      capabilities: { requires: ["demo:greet"], granted: ["demo:greet"] },
+    });
+    expect(broken).toMatchObject({
+      id: "broken",
+      version: "1.0.0",
+      status: "failed",
+      skipped: false,
+    });
+    expect(broken?.error).toContain("entry point");
+    expect(report.summary).toEqual({ total: 3, loaded: 2, failed: 1, disabled: 0 });
+  });
+
+  it("reflects a plugin marked disabled via kernel.pluginStatus, without affecting other loaded plugins", async () => {
+    const pluginsRoot = trackedTempRoot();
+    writePluginDir(
+      pluginsRoot,
+      "leaf-a",
+      {
+        id: "leaf-a",
+        version: "1.0.0",
+        depends_on: {},
+        capabilities: { provides: [], requires: [] },
+        entry_point: "index.js",
+      },
+      { "index.js": "export {};\n" },
+    );
+    writePluginDir(
+      pluginsRoot,
+      "leaf-b",
+      {
+        id: "leaf-b",
+        version: "1.0.0",
+        depends_on: {},
+        capabilities: { provides: [], requires: [] },
+        entry_point: "index.js",
+      },
+      { "index.js": "export {};\n" },
+    );
+
+    const kernel = await bootstrapKernel({ pluginsRoot, env: {} });
+    expect(kernel.plugins.failed).toEqual([]);
+
+    kernel.pluginStatus.disable("leaf-a");
+    const report = kernel.introspect();
+
+    expect(report.plugins.find((plugin) => plugin.id === "leaf-a")?.status).toBe("disabled");
+    expect(report.plugins.find((plugin) => plugin.id === "leaf-b")?.status).toBe("loaded");
+    expect(report.summary).toEqual({ total: 2, loaded: 1, failed: 0, disabled: 1 });
+
+    kernel.pluginStatus.enable("leaf-a");
+    expect(kernel.introspect().plugins.find((plugin) => plugin.id === "leaf-a")?.status).toBe(
+      "loaded",
+    );
+  });
+
+  it("returns an empty report with zero counts when no plugins are present", async () => {
+    const pluginsRoot = trackedTempRoot();
+
+    const kernel = await bootstrapKernel({ pluginsRoot, env: {} });
+    const report = kernel.introspect();
+
+    expect(report.plugins).toEqual([]);
+    expect(report.summary).toEqual({ total: 0, loaded: 0, failed: 0, disabled: 0 });
+  });
+});
+
 describe("formatFatalStartupError", () => {
   it("formats an AppError as a single line with its code and message, never a stack trace", () => {
     const error = new ConfigError("Invalid configuration: PORT is required");
