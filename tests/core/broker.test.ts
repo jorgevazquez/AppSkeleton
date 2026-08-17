@@ -6,6 +6,7 @@ import {
   type CapabilityDenialReason,
 } from "../../src/core/broker.js";
 import { isErr, isOk } from "../../src/core/types.js";
+import { createInMemoryAuditSink } from "../../src/core/audit.js";
 
 /** Assert Ok and return the value, or fail the test with a readable message. */
 function expectOk<T>(result: { ok: boolean; value?: T; error?: unknown }): T {
@@ -299,5 +300,142 @@ describe("CapabilityBroker — no ambient/global way to reach another plugin's i
     expect((broker as unknown as Record<string, unknown>)["getProvider"]).toBeUndefined();
     expect((broker as unknown as Record<string, unknown>)["providers"]).toBeUndefined();
     expectDenied(broker.obtain("wiki", "db:query"), "not_declared");
+  });
+});
+
+describe("CapabilityBroker — audit trail (feature #11)", () => {
+  it("grant() success records a 'granted' audit entry with actor/target/outcome/timestamp", () => {
+    const auditSink = createInMemoryAuditSink();
+    const broker = createCapabilityBroker({ auditSink });
+    broker.declareRequirement("wiki", "db:query");
+
+    const before = Date.now();
+    expectOk(broker.grant("wiki", "db:query"));
+    const after = Date.now();
+
+    const entries = auditSink.query({ outcome: "granted" });
+    expect(entries).toHaveLength(1);
+    const entry = entries[0]!;
+    expect(entry.actor).toBe("wiki");
+    expect(entry.target).toBe("db:query");
+    expect(entry.outcome).toBe("granted");
+    expect(typeof entry.timestamp).toBe("number");
+    expect(entry.timestamp).toBeGreaterThanOrEqual(before);
+    expect(entry.timestamp).toBeLessThanOrEqual(after);
+  });
+
+  it("grant() denial (not declared) records a 'denied' audit entry naming the reason", () => {
+    const auditSink = createInMemoryAuditSink();
+    const broker = createCapabilityBroker({ auditSink });
+
+    // "wiki" never declared db:query, so grant() must fail.
+    expectDenied(broker.grant("wiki", "db:query"), "not_declared");
+
+    const entries = auditSink.query({ outcome: "denied" });
+    expect(entries).toHaveLength(1);
+    const entry = entries[0]!;
+    expect(entry.actor).toBe("wiki");
+    expect(entry.target).toBe("db:query");
+    expect(entry.outcome).toBe("denied");
+    expect(entry.details?.["reason"]).toBe("not_declared");
+    expect(typeof entry.timestamp).toBe("number");
+  });
+
+  it("revoke() records a 'revoked' audit entry with actor/target/outcome/timestamp", () => {
+    const auditSink = createInMemoryAuditSink();
+    const broker = createCapabilityBroker({ auditSink });
+    broker.declareRequirement("wiki", "db:query");
+    expectOk(broker.grant("wiki", "db:query"));
+    auditSink.clear(); // isolate this assertion from the grant's own audit entry
+
+    const before = Date.now();
+    broker.revoke("wiki", "db:query");
+    const after = Date.now();
+
+    const entries = auditSink.query({ outcome: "revoked" });
+    expect(entries).toHaveLength(1);
+    const entry = entries[0]!;
+    expect(entry.actor).toBe("wiki");
+    expect(entry.target).toBe("db:query");
+    expect(entry.outcome).toBe("revoked");
+    expect(entry.timestamp).toBeGreaterThanOrEqual(before);
+    expect(entry.timestamp).toBeLessThanOrEqual(after);
+  });
+
+  it("revoke() on a never-granted capability still records a 'revoked' audit entry (revoke is a mutating action regardless of prior state)", () => {
+    const auditSink = createInMemoryAuditSink();
+    const broker = createCapabilityBroker({ auditSink });
+    broker.declareRequirement("wiki", "db:query");
+
+    broker.revoke("wiki", "db:query");
+
+    expect(auditSink.query({ outcome: "revoked" })).toHaveLength(1);
+  });
+
+  it("obtain() success (a permission check) records a 'granted' audit entry", () => {
+    const auditSink = createInMemoryAuditSink();
+    const broker = createCapabilityBroker({ auditSink });
+    broker.declareRequirement("wiki", "db:query");
+    expectOk(broker.registerProvider("database-mysql", "db:query", () => "rows"));
+    expectOk(broker.grant("wiki", "db:query"));
+    auditSink.clear(); // isolate this assertion from the grant's own audit entry
+
+    expectOk(broker.obtain("wiki", "db:query"));
+
+    const entries = auditSink.query({ outcome: "granted" });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.actor).toBe("wiki");
+    expect(entries[0]?.target).toBe("db:query");
+  });
+
+  it("obtain() denial (permission check fails) records a 'denied' audit entry naming the reason, for each denial reason", () => {
+    const auditSink = createInMemoryAuditSink();
+    const broker = createCapabilityBroker({ auditSink });
+
+    // not_declared
+    expectDenied(broker.obtain("wiki", "db:query"), "not_declared");
+
+    // not_granted (declared but never granted)
+    broker.declareRequirement("wiki", "http:route");
+    expectDenied(broker.obtain("wiki", "http:route"), "not_granted");
+
+    // no_provider (declared + granted, but nobody registered an implementation)
+    broker.declareRequirement("wiki", "render:template");
+    expectOk(broker.grant("wiki", "render:template"));
+    expectDenied(broker.obtain("wiki", "render:template"), "no_provider");
+
+    const denied = auditSink.query({ outcome: "denied" });
+    expect(denied).toHaveLength(3);
+    expect(denied.map((e) => e.details?.["reason"])).toEqual([
+      "not_declared",
+      "not_granted",
+      "no_provider",
+    ]);
+    expect(denied.every((e) => e.actor === "wiki")).toBe(true);
+  });
+
+  it("a full grant -> obtain -> revoke -> obtain lifecycle produces an ordered, queryable audit trail", () => {
+    const auditSink = createInMemoryAuditSink();
+    const broker = createCapabilityBroker({ auditSink });
+    broker.declareRequirement("wiki", "db:query");
+    expectOk(broker.registerProvider("database-mysql", "db:query", () => "rows"));
+
+    expectOk(broker.grant("wiki", "db:query"));
+    expectOk(broker.obtain("wiki", "db:query"));
+    broker.revoke("wiki", "db:query");
+    expectDenied(broker.obtain("wiki", "db:query"), "not_granted");
+
+    const trail = auditSink.query({ actor: "wiki", target: "db:query" });
+    expect(trail.map((e) => e.outcome)).toEqual(["granted", "granted", "revoked", "denied"]);
+  });
+
+  it("broker works normally with no auditSink provided — recording is opt-in, not required", () => {
+    const broker = createCapabilityBroker();
+    broker.declareRequirement("wiki", "db:query");
+
+    expect(() => {
+      expectOk(broker.grant("wiki", "db:query"));
+      broker.revoke("wiki", "db:query");
+    }).not.toThrow();
   });
 });
