@@ -37,19 +37,38 @@
  * (dependents torn down before the dependencies they rely on), revoking
  * every capability the loader granted along the way.
  *
- * ## Failure handling
+ * ## Failure handling — error isolation (spec.md: "a broken plugin must not
+ * crash the kernel or unrelated plugins")
  *
- * This module does not implement kernel-wide fault isolation — letting one
- * broken plugin not affect unrelated plugins already running is feature
- * #10, which is layered on top of this loader. Within a single
- * `loadPlugins()` call: if any step for a plugin throws (a hook itself, or
- * broker wiring — e.g. two plugins racing to provide the same capability
- * id), the whole load pass stops, every plugin that *did* finish loading is
- * torn down (best-effort, in reverse order, mirroring `unloadPlugins`), and
- * `Err(PluginLoadError)` is returned naming the plugin and cause. Within
- * `unloadPlugins()`, a single plugin's teardown failing does NOT stop the
- * rest — every plugin still gets its `onDisable`/`onUninstall` attempted,
- * and any failures are aggregated into one `Err(PluginLoadError)` afterward.
+ * `loadPlugins()` never lets one plugin's failure abort the whole pass.
+ * Every step for a plugin — broker wiring (declaring requirements,
+ * registering providers, grants) and its `onInstall`/`onEnable` hooks — runs
+ * inside a try/catch scoped to that plugin alone. If it throws, the error is
+ * logged and the plugin is recorded in the result's `failed` list instead of
+ * `loaded`; the loop then moves on to the next plugin in dependency order
+ * exactly as if nothing happened. Plugins with no `depends_on` relationship
+ * to the failed one — and any dependency that already finished loading
+ * *before* it, since dependency order guarantees those are unaffected by a
+ * dependent's later failure — are never rolled back and load normally.
+ *
+ * A plugin whose `depends_on` names an id that already failed (directly or
+ * transitively) is never attempted at all: it is recorded in `failed` with
+ * `skipped: true` and a message naming the failed dependency, without
+ * running any of its own broker wiring or hooks. This cascades naturally
+ * through a dependency chain, since `order` always places a dependency
+ * before its dependents.
+ *
+ * `loadPlugins()` only returns `Err(PluginLoadError)` when no load order
+ * could be computed at all — a structural problem with the dependency graph
+ * itself (circular dependency, missing dependency, an unsatisfied semver
+ * range, or a duplicate plugin id), surfaced by `resolveLoadOrder()` before
+ * any plugin is attempted. That is a kernel/config-level problem, not a
+ * single plugin's runtime failure, so there is nothing to isolate.
+ *
+ * Within `unloadPlugins()`, a single plugin's teardown failing does NOT stop
+ * the rest — every plugin still gets its `onDisable`/`onUninstall`
+ * attempted, and any failures are aggregated into one `Err(PluginLoadError)`
+ * afterward.
  */
 import type { CapabilityBroker, PluginCapabilityAccess } from "./broker.js";
 import { PluginLoadError } from "./errors.js";
@@ -126,12 +145,31 @@ export interface LoadedPlugin {
   readonly context: PluginLifecycleContext;
 }
 
-/** Result of a successful {@link loadPlugins} call. */
+/**
+ * One plugin that did NOT complete loading — either its own broker wiring
+ * or a lifecycle hook threw ({@link skipped} `false`), or it was never even
+ * attempted because one of its dependencies already failed
+ * ({@link skipped} `true`). Either way, this plugin is isolated: its failure
+ * does not affect `loaded` plugins or dependency-unrelated plugins recorded
+ * elsewhere in the same {@link PluginLoadResult}.
+ */
+export interface FailedPlugin {
+  readonly id: string;
+  readonly manifest: PluginManifest;
+  /** The normalized failure. For a cascaded skip, names the failed dependency (see `error.details.dependencyId`). */
+  readonly error: PluginLoadError;
+  /** `true` if this plugin's own wiring/hooks never ran because a dependency of it failed first. */
+  readonly skipped: boolean;
+}
+
+/** Result of a {@link loadPlugins} call. Always `Ok` unless the dependency graph itself is unresolvable — see the module docs. */
 export interface PluginLoadResult {
   /** The dependency order used (dependencies before dependents) — graph.ts's `resolveLoadOrder()` output. */
   readonly order: readonly string[];
   /** One entry per plugin that completed `onInstall` + `onEnable`, in load order. Pass to {@link unloadPlugins} for teardown. */
   readonly loaded: readonly LoadedPlugin[];
+  /** One entry per plugin that failed or was skipped due to a failed dependency, in load order. Never affects `loaded`. */
+  readonly failed: readonly FailedPlugin[];
 }
 
 function describeError(error: unknown): string {
@@ -158,29 +196,11 @@ async function teardownOne(plugin: LoadedPlugin, broker: CapabilityBroker): Prom
   }
 }
 
-/** Best-effort rollback after a mid-load failure: tear down everything that did finish loading, in reverse order. */
-async function rollback(
-  loaded: readonly LoadedPlugin[],
-  broker: CapabilityBroker,
-  logger: Logger,
-): Promise<void> {
-  for (const plugin of [...loaded].reverse()) {
-    try {
-      await teardownOne(plugin, broker);
-    } catch (cause) {
-      logger.error(
-        { plugin: plugin.id, err: cause },
-        `Rollback: plugin "${plugin.id}" failed to tear down cleanly; continuing rollback of the rest.`,
-      );
-    }
-  }
-}
-
 /**
  * Instantiate `definitions` in dependency order and run each plugin's
  * `onInstall` then `onEnable`, wiring its declared-and-granted capabilities
  * through `broker` first. See the module docs for the full per-plugin
- * sequence and failure/rollback behavior.
+ * sequence and failure-isolation behavior.
  */
 export async function loadPlugins(
   definitions: readonly PluginDefinition[],
@@ -202,6 +222,12 @@ export async function loadPlugins(
   const order = orderResult.value;
 
   const loaded: LoadedPlugin[] = [];
+  const failed: FailedPlugin[] = [];
+  // Ids that failed (directly or by cascade) — checked against each later
+  // plugin's own depends_on to decide whether to skip it too. `order`
+  // guarantees every dependency is visited before its dependents, so a
+  // single forward pass is enough for the cascade to reach every descendant.
+  const failedIds = new Set<string>();
 
   for (const id of order) {
     const definition = byId.get(id);
@@ -211,6 +237,23 @@ export async function loadPlugins(
       continue;
     }
     const { manifest, module } = definition;
+
+    const failedDependencyId = Object.keys(manifest.depends_on).find((dependencyId) =>
+      failedIds.has(dependencyId),
+    );
+    if (failedDependencyId !== undefined) {
+      const skipError = new PluginLoadError(
+        `Plugin "${id}" was not loaded because its dependency "${failedDependencyId}" failed to load.`,
+        { details: { pluginId: id, dependencyId: failedDependencyId } },
+      );
+      logger.error(
+        { plugin: id, dependency: failedDependencyId },
+        `Plugin "${id}" skipped: its dependency "${failedDependencyId}" failed to load.`,
+      );
+      failed.push({ id, manifest, error: skipError, skipped: true });
+      failedIds.add(id);
+      continue;
+    }
 
     try {
       broker.declareRequirements(id, manifest.capabilities.requires);
@@ -252,14 +295,14 @@ export async function loadPlugins(
     } catch (cause) {
       logger.error(
         { plugin: id, err: cause },
-        `Plugin "${id}" failed to load; rolling back ${loaded.length} already-loaded plugin(s).`,
+        `Plugin "${id}" failed to load; isolated from unrelated plugins — load continues.`,
       );
-      await rollback(loaded, broker, logger);
-      return err(toPluginLoadError(id, cause));
+      failed.push({ id, manifest, error: toPluginLoadError(id, cause), skipped: false });
+      failedIds.add(id);
     }
   }
 
-  return ok({ order, loaded });
+  return ok({ order, loaded, failed });
 }
 
 export interface UnloadPluginsOptions {

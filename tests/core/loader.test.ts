@@ -1,3 +1,4 @@
+import { Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { createCapabilityBroker, type CapabilityBroker } from "../../src/core/broker.js";
 import { CapabilityDeniedError, PluginLoadError } from "../../src/core/errors.js";
@@ -5,14 +6,37 @@ import {
   grantAllDeclared,
   loadPlugins,
   unloadPlugins,
+  type FailedPlugin,
   type LoadedPlugin,
   type PluginDefinition,
   type PluginLifecycleContext,
   type PluginLoadResult,
   type PluginModule,
 } from "../../src/core/loader.js";
+import { createLogger } from "../../src/core/logger.js";
 import type { PluginManifest } from "../../src/core/manifest.js";
 import { isErr, isOk } from "../../src/core/types.js";
+
+/** In-memory sink for a pino logger's raw ndjson output, mirroring registry.test.ts's helper. */
+function createCapturingLogger() {
+  const chunks: string[] = [];
+  const stream = new Writable({
+    write(chunk: Buffer | string, _encoding, callback) {
+      chunks.push(chunk.toString());
+      callback();
+    },
+  });
+  const logger = createLogger({ stream, level: "trace" });
+  return {
+    logger,
+    lines: (): Record<string, unknown>[] =>
+      chunks
+        .join("")
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>),
+  };
+}
 
 /** Build a minimal, schema-shaped manifest fixture without going through validateManifest(). */
 function manifest(
@@ -246,7 +270,7 @@ describe("loadPlugins — wires each plugin's granted capabilities via the broke
     expect(grantAllDeclared()).toBe(true);
   });
 
-  it("fails the whole load when a plugin declares capabilities.provides but its module supplies no implementation", async () => {
+  it("marks a plugin failed (not the whole load) when it declares capabilities.provides but its module supplies no implementation", async () => {
     const log: string[] = [];
     const broker = createCapabilityBroker();
     const definitions: PluginDefinition[] = [
@@ -256,15 +280,20 @@ describe("loadPlugins — wires each plugin's granted capabilities via the broke
       },
     ];
 
-    const error = expectErr(await loadPlugins(definitions, broker));
+    const result = expectOk(await loadPlugins(definitions, broker));
 
-    expect(error).toBeInstanceOf(PluginLoadError);
-    expect(error.message).toContain("broken");
-    expect(error.message).toContain("demo:greet");
+    expect(result.loaded).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    const failure = result.failed[0] as FailedPlugin;
+    expect(failure.id).toBe("broken");
+    expect(failure.skipped).toBe(false);
+    expect(failure.error).toBeInstanceOf(PluginLoadError);
+    expect(failure.error.message).toContain("broken");
+    expect(failure.error.message).toContain("demo:greet");
     expect(log).toEqual([]);
   });
 
-  it("fails the whole load when two unrelated plugins both declare the same provided capability id, rolling back the first", async () => {
+  it("marks only the second plugin failed when two unrelated plugins both declare the same provided capability id; the first stays loaded (no rollback)", async () => {
     const log: string[] = [];
     const broker = createCapabilityBroker();
     const definitions: PluginDefinition[] = [
@@ -278,23 +307,22 @@ describe("loadPlugins — wires each plugin's granted capabilities via the broke
       },
     ];
 
-    const error = expectErr(await loadPlugins(definitions, broker));
+    const result = expectOk(await loadPlugins(definitions, broker));
 
-    expect(error).toBeInstanceOf(PluginLoadError);
-    expect(error.details?.["existingProviderId"]).toBe("alpha");
-    expect(error.details?.["attemptedProviderId"]).toBe("beta");
-    // alpha fully loaded then got rolled back; beta never reached its own hooks.
-    expect(log).toEqual([
-      "alpha:onInstall",
-      "alpha:onEnable",
-      "alpha:onDisable",
-      "alpha:onUninstall",
-    ]);
+    expect(result.loaded.map((plugin) => plugin.id)).toEqual(["alpha"]);
+    expect(result.failed).toHaveLength(1);
+    const failure = result.failed[0] as FailedPlugin;
+    expect(failure.id).toBe("beta");
+    expect(failure.skipped).toBe(false);
+    expect(failure.error.details?.["existingProviderId"]).toBe("alpha");
+    expect(failure.error.details?.["attemptedProviderId"]).toBe("beta");
+    // alpha's own hooks completed and were never torn down; beta never reached its own hooks.
+    expect(log).toEqual(["alpha:onInstall", "alpha:onEnable"]);
   });
 });
 
-describe("loadPlugins — a mid-load failure rolls back already-loaded plugins in reverse order", () => {
-  it("tears down (onDisable/onUninstall) and revokes capabilities for plugins that finished loading before the failure", async () => {
+describe("loadPlugins — a failing plugin's already-loaded dependencies are not rolled back", () => {
+  it("keeps a dependency chain loaded when a plugin above it fails; only the failing plugin is marked failed", async () => {
     const log: string[] = [];
     const broker = createCapabilityBroker();
     const definitions: PluginDefinition[] = [
@@ -316,26 +344,146 @@ describe("loadPlugins — a mid-load failure rolls back already-loaded plugins i
       },
     ];
 
-    const error = expectErr(await loadPlugins(definitions, broker));
+    const result = expectOk(await loadPlugins(definitions, broker));
 
-    expect(error).toBeInstanceOf(PluginLoadError);
-    expect(error.message).toContain("top");
-    expect(error.message).toContain("boom");
+    expect(result.loaded.map((plugin) => plugin.id)).toEqual(["svc", "mid"]);
+    expect(result.failed).toHaveLength(1);
+    const failure = result.failed[0] as FailedPlugin;
+    expect(failure.id).toBe("top");
+    expect(failure.skipped).toBe(false);
+    expect(failure.error).toBeInstanceOf(PluginLoadError);
+    expect(failure.error.message).toContain("top");
+    expect(failure.error.message).toContain("boom");
 
+    // No teardown of svc/mid: they finished loading, and top's failure doesn't cascade
+    // upward to the dependencies it relies on — only downward to its own dependents (it has none).
     expect(log).toEqual([
       "svc:onInstall",
       "svc:onEnable",
       "mid:onInstall",
       "mid:onEnable",
       "top:onInstall",
-      "mid:onDisable",
-      "mid:onUninstall",
-      "svc:onDisable",
-      "svc:onUninstall",
     ]);
 
-    // mid's grant of svc:thing was revoked as part of the rollback.
-    expect(broker.isGranted("mid", "svc:thing")).toBe(false);
+    // mid's grant of svc:thing is untouched — mid was never rolled back.
+    expect(broker.isGranted("mid", "svc:thing")).toBe(true);
+  });
+});
+
+describe("loadPlugins — error isolation (feature #10): a failing plugin cannot crash the kernel or unrelated plugins", () => {
+  it("a plugin that throws in onEnable results in only that plugin (and its dependents) being marked failed", async () => {
+    const log: string[] = [];
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      { manifest: manifest("base"), module: trackingModule("base", log) },
+      {
+        manifest: manifest("flaky", { dependsOn: { base: "^1.0.0" } }),
+        module: trackingModule("flaky", log, {
+          onEnable: () => {
+            throw new Error("flaky boom");
+          },
+        }),
+      },
+      {
+        manifest: manifest("dependent", { dependsOn: { flaky: "^1.0.0" } }),
+        module: trackingModule("dependent", log),
+      },
+    ];
+
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    expect(result.loaded.map((plugin) => plugin.id)).toEqual(["base"]);
+    expect(result.failed.map((failure) => failure.id).sort()).toEqual(["dependent", "flaky"]);
+
+    const flakyFailure = result.failed.find((failure) => failure.id === "flaky") as FailedPlugin;
+    expect(flakyFailure.skipped).toBe(false);
+    expect(flakyFailure.error).toBeInstanceOf(PluginLoadError);
+    expect(flakyFailure.error.message).toContain("flaky boom");
+
+    const dependentFailure = result.failed.find(
+      (failure) => failure.id === "dependent",
+    ) as FailedPlugin;
+    expect(dependentFailure.skipped).toBe(true);
+    expect(dependentFailure.error.message).toContain("flaky");
+
+    // dependent's own hooks never ran at all — it was skipped, not attempted, because
+    // its dependency (flaky) already failed.
+    expect(log).toEqual(["base:onInstall", "base:onEnable", "flaky:onInstall", "flaky:onEnable"]);
+  });
+
+  it("an independent plugin with no depends_on relationship to a failing plugin still loads successfully", async () => {
+    const log: string[] = [];
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("broken"),
+        module: trackingModule("broken", log, {
+          onInstall: () => {
+            throw new Error("broken boom");
+          },
+        }),
+      },
+      { manifest: manifest("solo"), module: trackingModule("solo", log) },
+    ];
+
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    expect(result.loaded.map((plugin) => plugin.id)).toEqual(["solo"]);
+    expect(log).toEqual(["broken:onInstall", "solo:onInstall", "solo:onEnable"]);
+    expect(result.failed.map((failure) => failure.id)).toEqual(["broken"]);
+    expect(result.failed[0]?.skipped).toBe(false);
+  });
+
+  it("logs the failure (plugin id + cause) for the plugin that threw, via the provided logger", async () => {
+    const log: string[] = [];
+    const broker = createCapabilityBroker();
+    const { logger, lines } = createCapturingLogger();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("broken"),
+        module: trackingModule("broken", log, {
+          onEnable: () => {
+            throw new Error("kaboom");
+          },
+        }),
+      },
+    ];
+
+    await loadPlugins(definitions, broker, { logger });
+
+    const errorLines = lines().filter((line) => line["level"] === 50);
+    expect(errorLines).toHaveLength(1);
+    expect(errorLines[0]?.["plugin"]).toBe("broken");
+  });
+
+  it("multiple unrelated plugins can each fail independently in a single load pass", async () => {
+    const log: string[] = [];
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("first"),
+        module: trackingModule("first", log, {
+          onInstall: () => {
+            throw new Error("first boom");
+          },
+        }),
+      },
+      {
+        manifest: manifest("second"),
+        module: trackingModule("second", log, {
+          onEnable: () => {
+            throw new Error("second boom");
+          },
+        }),
+      },
+      { manifest: manifest("third"), module: trackingModule("third", log) },
+    ];
+
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    expect(result.loaded.map((plugin) => plugin.id)).toEqual(["third"]);
+    expect(result.failed.map((failure) => failure.id).sort()).toEqual(["first", "second"]);
+    expect(result.failed.every((failure) => !failure.skipped)).toBe(true);
   });
 });
 
