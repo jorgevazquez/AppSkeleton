@@ -685,7 +685,7 @@
       "Write a test asserting a changed template is picked up in dev mode and cached (not recompiled) in production mode"
     ],
     "depends_on": [46],
-    "passes": false
+    "passes": true
   },
   {
     "id": 54,
