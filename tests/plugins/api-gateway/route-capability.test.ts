@@ -162,3 +162,57 @@ describe("createRouteRegistrar — schema enforcement (feature #59, step 2)", ()
     expect(getApp).not.toHaveBeenCalled();
   });
 });
+
+describe("createRouteRegistrar — requiredPermission validation (feature #65, step 1)", () => {
+  it("accepts a well-formed 'resource:action' requiredPermission and threads it through to the route config", () => {
+    const app = Fastify() as unknown as ApiGatewayApp;
+    const routeSpy = vi.spyOn(app, "route");
+    const { registerRoute } = createRouteRegistrar(() => app);
+
+    expect(() => registerRoute(baseOptions({ requiredPermission: "widgets:read" }))).not.toThrow();
+
+    expect(routeSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          requiredPermission: { resource: "widgets", action: "read" },
+        }),
+      }),
+    );
+  });
+
+  it("omits requiredPermission from the route config entirely when not set — the overwhelming majority of routes", () => {
+    const app = Fastify() as unknown as ApiGatewayApp;
+    const routeSpy = vi.spyOn(app, "route");
+    const { registerRoute } = createRouteRegistrar(() => app);
+
+    registerRoute(baseOptions());
+
+    const call = routeSpy.mock.calls[0]?.[0] as { config?: Record<string, unknown> } | undefined;
+    expect(call?.config?.["requiredPermission"]).toBeUndefined();
+  });
+
+  it.each([
+    ["missing colon", "widgets"],
+    ["empty resource", ":read"],
+    ["empty action", "widgets:"],
+    ["more than one colon", "widgets:read:extra"],
+    ["uppercase segment", "Widgets:read"],
+    ["empty string", ""],
+  ])("throws ValidationError for a malformed requiredPermission (%s: %j)", (_label, malformed) => {
+    const app = Fastify() as unknown as ApiGatewayApp;
+    const { registerRoute } = createRouteRegistrar(() => app);
+
+    expect(() => registerRoute(baseOptions({ requiredPermission: malformed }))).toThrow(
+      ValidationError,
+    );
+  });
+
+  it("does not register the route with Fastify when requiredPermission is malformed", () => {
+    const app = Fastify() as unknown as ApiGatewayApp;
+    const routeSpy = vi.spyOn(app, "route");
+    const { registerRoute } = createRouteRegistrar(() => app);
+
+    expect(() => registerRoute(baseOptions({ requiredPermission: "not-valid" }))).toThrow();
+    expect(routeSpy).not.toHaveBeenCalled();
+  });
+});
