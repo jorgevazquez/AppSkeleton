@@ -659,7 +659,7 @@
       "Write a test asserting a registered asset is served with correct headers and content"
     ],
     "depends_on": [48],
-    "passes": false
+    "passes": true
   },
   {
     "id": 52,
