@@ -1,17 +1,37 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConfigError, PluginLoadError } from "../../src/core/errors.js";
 import { isOk } from "../../src/core/types.js";
-import { bootstrapKernel, buildServer, formatFatalStartupError } from "../../src/server/index.js";
+import { bootstrapKernel, formatFatalStartupError, listen } from "../../src/server/index.js";
 
 /** Real `src/plugins` root — proves the wiring works against the actual shipped tree. */
 const REAL_PLUGINS_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../src/plugins",
 );
+
+/** Ask the OS for a currently-free TCP port by briefly binding to port 0 and reading it back. */
+async function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.unref();
+    probe.on("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      probe.close(() => {
+        if (address === null || typeof address === "string") {
+          reject(new Error("Could not determine a free port."));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+  });
+}
 
 const tempRoots: string[] = [];
 
@@ -56,18 +76,30 @@ describe("bootstrapKernel", () => {
     expect(kernel.broker).toBeDefined();
     expect(kernel.auditSink).toBeDefined();
     expect(kernel.eventBus).toBeDefined();
+    // No api-gateway plugin present at all — nothing constructed a Fastify
+    // instance for this boot, so there is nothing to mount/listen on.
+    expect(kernel.httpApp).toBeUndefined();
   });
 
   it("boots cleanly against the real src/plugins tree without throwing", async () => {
     const kernel = await bootstrapKernel({ pluginsRoot: REAL_PLUGINS_ROOT, env: {} });
 
-    // Every currently-shipped manifest declares an entry_point that doesn't
-    // exist on disk yet (see claude-progress.txt) — each becomes an
+    // Most currently-shipped manifests still declare an entry_point that
+    // doesn't exist on disk yet (see claude-progress.txt) — each becomes an
     // isolated, logged failure rather than crashing the boot, so this only
     // asserts the shape holds, not exact counts (which would grow brittle
     // as later features add real plugin lifecycle modules).
     expect(Array.isArray(kernel.plugins.loaded)).toBe(true);
     expect(Array.isArray(kernel.plugins.failed)).toBe(true);
+
+    // api-gateway (feature #58) does have a real lifecycle module now — its
+    // onEnable hook should have constructed a live Fastify instance, mounted
+    // into the kernel via kernel.httpApp.
+    expect(kernel.httpApp).toBeDefined();
+    const res = await kernel.httpApp?.inject({ method: "GET", url: "/health" });
+    expect(res?.statusCode).toBe(200);
+    expect(res?.json()).toEqual({ status: "ok" });
+    await kernel.httpApp?.close();
   });
 
   it("discovers, loads, and wires a real plugin end-to-end (registry -> manifest -> loader -> broker)", async () => {
@@ -336,21 +368,140 @@ describe("formatFatalStartupError", () => {
   });
 });
 
-describe("buildServer", () => {
-  it("still answers /health with the bare shape when built without a kernel (toolchain smoke test compatibility)", async () => {
-    const app = buildServer();
-    const res = await app.inject({ method: "GET", url: "/health" });
-    expect(res.json()).toEqual({ status: "ok" });
-    await app.close();
+describe("kernel.httpApp — Fastify owned by api-gateway, mounted into the kernel (feature #58)", () => {
+  /** A fixture plugin shaped like api-gateway's own `index.ts`: constructs a Fastify instance in `onEnable` and exposes it via `http:route`. */
+  const FIXTURE_API_GATEWAY_INDEX = `
+    import Fastify from "fastify";
+    let app;
+    export const provides = {
+      "http:route": { getApp: () => app },
+    };
+    export function onEnable() {
+      app = Fastify({ logger: false });
+      app.get("/health", async () => ({ status: "ok" }));
+    }
+  `;
+
+  it("is undefined when no plugin named api-gateway is loaded (present but unrelated plugins)", async () => {
+    const pluginsRoot = trackedTempRoot();
+    writePluginDir(
+      pluginsRoot,
+      "unrelated",
+      {
+        id: "unrelated",
+        version: "1.0.0",
+        depends_on: {},
+        capabilities: { provides: [], requires: [] },
+        entry_point: "index.js",
+      },
+      { "index.js": "export {};\n" },
+    );
+
+    const kernel = await bootstrapKernel({ pluginsRoot, env: {} });
+
+    expect(kernel.plugins.loaded.map((plugin) => plugin.id)).toEqual(["unrelated"]);
+    expect(kernel.httpApp).toBeUndefined();
   });
 
-  it("includes plugin load counts in /health when built with a kernel", async () => {
+  it("is undefined when api-gateway is present but fails to load", async () => {
+    const pluginsRoot = trackedTempRoot();
+    writePluginDir(pluginsRoot, "api-gateway", {
+      id: "api-gateway",
+      version: "1.0.0",
+      depends_on: {},
+      capabilities: { provides: ["http:route"], requires: [] },
+      entry_point: "index.js",
+    });
+    // Note: "api-gateway/index.js" is never written, so it fails to import().
+
+    const kernel = await bootstrapKernel({ pluginsRoot, env: {} });
+
+    expect(kernel.plugins.failed.map((plugin) => plugin.id)).toEqual(["api-gateway"]);
+    expect(kernel.httpApp).toBeUndefined();
+  });
+
+  it("is undefined, without throwing, when api-gateway's http:route provider doesn't have the expected shape", async () => {
+    const pluginsRoot = trackedTempRoot();
+    writePluginDir(
+      pluginsRoot,
+      "api-gateway",
+      {
+        id: "api-gateway",
+        version: "1.0.0",
+        depends_on: {},
+        capabilities: { provides: ["http:route"], requires: [] },
+        entry_point: "index.js",
+      },
+      { "index.js": 'export const provides = { "http:route": "not-an-app" };\n' },
+    );
+
+    const kernel = await bootstrapKernel({ pluginsRoot, env: {} });
+
+    expect(kernel.plugins.loaded.map((plugin) => plugin.id)).toEqual(["api-gateway"]);
+    expect(kernel.httpApp).toBeUndefined();
+  });
+
+  it("is the live Fastify instance api-gateway's onEnable constructed, answering /health end-to-end", async () => {
+    const pluginsRoot = trackedTempRoot();
+    writePluginDir(
+      pluginsRoot,
+      "api-gateway",
+      {
+        id: "api-gateway",
+        version: "1.0.0",
+        depends_on: {},
+        capabilities: { provides: ["http:route"], requires: [] },
+        entry_point: "index.js",
+      },
+      { "index.js": FIXTURE_API_GATEWAY_INDEX },
+    );
+
+    const kernel = await bootstrapKernel({ pluginsRoot, env: {} });
+
+    expect(kernel.httpApp).toBeDefined();
+    const res = await kernel.httpApp?.inject({ method: "GET", url: "/health" });
+    expect(res?.statusCode).toBe(200);
+    expect(res?.json()).toEqual({ status: "ok" });
+    await kernel.httpApp?.close();
+  });
+
+  it("against the real src/plugins tree, is the same Fastify instance the real api-gateway plugin constructed", async () => {
+    const kernel = await bootstrapKernel({ pluginsRoot: REAL_PLUGINS_ROOT, env: {} });
+
+    expect(kernel.plugins.loaded.map((plugin) => plugin.id)).toContain("api-gateway");
+    expect(kernel.httpApp).toBeDefined();
+    await kernel.httpApp?.close();
+  });
+});
+
+describe("listen — starts the HTTP server only after every plugin has finished loading (feature #58, step 2)", () => {
+  it("rejects with a PluginLoadError instead of attempting to listen when kernel.httpApp is undefined", async () => {
     const pluginsRoot = trackedTempRoot();
     const kernel = await bootstrapKernel({ pluginsRoot, env: {} });
 
-    const app = buildServer({ kernel });
-    const res = await app.inject({ method: "GET", url: "/health" });
-    expect(res.json()).toEqual({ status: "ok", plugins: { loaded: 0, failed: 0 } });
-    await app.close();
+    expect(kernel.httpApp).toBeUndefined();
+    await expect(listen(kernel)).rejects.toBeInstanceOf(PluginLoadError);
+  });
+
+  it("starts listening on the kernel's resolved port/host using the api-gateway-owned Fastify instance", async () => {
+    // CoreConfigSchema requires PORT >= 1 (see config.ts), so this can't ask
+    // the OS for an ephemeral port via "0" the way a raw net.Server could —
+    // find one directly instead, so this test can't collide with anything
+    // else already listening on the host.
+    const freePort = await findFreePort();
+
+    const kernel = await bootstrapKernel({
+      pluginsRoot: REAL_PLUGINS_ROOT,
+      env: { PORT: String(freePort) },
+    });
+    expect(kernel.httpApp).toBeDefined();
+    expect(kernel.config.PORT).toBe(freePort);
+
+    await listen(kernel);
+    try {
+      expect(kernel.httpApp?.server.listening).toBe(true);
+    } finally {
+      await kernel.httpApp?.close();
+    }
   });
 });
