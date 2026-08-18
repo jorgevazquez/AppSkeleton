@@ -1387,7 +1387,7 @@
       "Write a test asserting the same request ID appears in both the response header and the corresponding log entries"
     ],
     "depends_on": [58, 3],
-    "passes": false
+    "passes": true
   },
   {
     "id": 109,

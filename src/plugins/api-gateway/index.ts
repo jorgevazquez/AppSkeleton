@@ -33,6 +33,7 @@
  * `app.route()` wrapping; this module only wires it to the same `getApp`
  * closure `HttpRouteCapability.getApp()` already uses).
  */
+import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createLogger } from "../../core/logger.js";
 import type { PluginLifecycleContext } from "../../core/loader.js";
@@ -40,6 +41,7 @@ import { registerCsrfProtection } from "./src/csrf.js";
 import { registerErrorHandling } from "./src/error-handler.js";
 import { loadRateLimitConfig } from "./src/rate-limit-config.js";
 import { registerRateLimiting } from "./src/rate-limit.js";
+import { registerRequestId } from "./src/request-id.js";
 import {
   createRouteRegistrar,
   type HttpRouteRegistrationCapability,
@@ -77,6 +79,12 @@ export {
   type CookieConfig,
   type SessionConfig,
 } from "./src/session-config.js";
+
+// Re-exported so a consuming plugin (or a test) can reference the
+// X-Request-Id response header name / wire the hook onto a standalone test
+// instance without reaching into this plugin's `src/` internals — feature
+// #108, see `./src/request-id.ts` for the full contract.
+export { REQUEST_ID_HEADER, registerRequestId } from "./src/request-id.js";
 
 // Re-exported so a consuming plugin (or a test) can reference the global
 // rate-limit config schema/loader, or wire rate limiting onto a standalone
@@ -135,6 +143,13 @@ export { DEFAULT_API_VERSION } from "./src/route-capability.js";
  * elsewhere in this module must use this exact inferred type, not a
  * default-generic `FastifyInstance`.
  *
+ * `loggerStream` is exported/threaded through purely for tests (feature
+ * #108's step 3, see `../../../tests/plugins/api-gateway/request-id.test.ts`)
+ * to capture the raw ndjson lines this instance's logger emits, the same
+ * way `../../core/logger.ts`'s own tests capture `createLogger()`'s output
+ * — `onEnable` below never passes one, so production boot is unaffected and
+ * keeps writing to pino's normal stdout destination.
+ *
  * Async — unlike the rest of this module's setup — solely because
  * `registerRateLimiting()` (feature #66) and `registerSecurityHeaders()`
  * (feature #67) must be *awaited* before any route is registered:
@@ -156,13 +171,34 @@ export { DEFAULT_API_VERSION } from "./src/route-capability.js";
  * regression this guards against. `onEnable` below awaits both functions
  * for exactly that reason.
  */
-async function buildApp(context: PluginLifecycleContext) {
+export async function buildApp(
+  context: PluginLifecycleContext,
+  { loggerStream }: { loggerStream?: NodeJS.WritableStream } = {},
+) {
   const built = Fastify({
+    // Feature #108, step 1: a fresh, cryptographically-strong ID for every
+    // incoming request, generated *before* any hook runs so it's available
+    // to all of them (including this module's own registerRequestId, and
+    // Fastify's own request logger — see ./src/request-id.ts's docs for
+    // exactly how the ID reaches log lines with no further wiring here).
+    // The default `requestIdHeader` stays unset (`false`), i.e. an
+    // incoming client-supplied id header is never trusted/echoed back as
+    // this request's id — only a value this server itself generated ever
+    // ends up in logs or the X-Request-Id response header.
+    genReqId: () => randomUUID(),
     loggerInstance: createLogger({
       level: context.logger.level,
       context: { module: "http" },
+      ...(loggerStream ? { stream: loggerStream } : {}),
     }),
   });
+
+  // Feature #108, step 2: echo the generated request id back as the
+  // X-Request-Id response header. Wired first — ordering doesn't actually
+  // matter for this particular hook (see ./src/request-id.ts's docs on why
+  // `onSend` is used) — so it reads the same as every other "wired before
+  // any route is registered" hook below.
+  registerRequestId(built);
 
   // Wired before any route is registered (feature #60) so the uniform
   // {code, message, details} envelope covers /health, every route a
