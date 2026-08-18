@@ -826,7 +826,7 @@
       "Write a test asserting a state-changing request without a valid CSRF token is rejected"
     ],
     "depends_on": [63],
-    "passes": false
+    "passes": true
   },
   {
     "id": 65,

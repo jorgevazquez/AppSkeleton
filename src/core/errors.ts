@@ -144,6 +144,25 @@ export class CapabilityDeniedError extends AppError {
 }
 
 /**
+ * A state-changing request (POST/PUT/PATCH/DELETE) failed CSRF validation
+ * (feature #64 — "CSRF protection for state-changing routes"): either no
+ * CSRF token was presented at all, or the token presented via the
+ * `x-csrf-token` request header did not match the value of the
+ * `csrf_token` cookie (the api-gateway plugin's double-submit-cookie
+ * scheme — see `api-gateway/src/csrf.ts`). Never thrown for a route that
+ * explicitly opted out via `registerRoute()`'s `csrfExempt` option — see
+ * `api-gateway/src/route-capability.ts`.
+ */
+export class CsrfError extends AppError {
+  readonly code = "CSRF_ERROR";
+  readonly statusCode = 403;
+
+  protected override defaultPublicMessage(): string {
+    return "CSRF token missing or invalid.";
+  }
+}
+
+/**
  * No resource matched the request. Used by api-gateway's uniform 4xx error
  * envelope (feature #60) for both an unmatched route (no handler registered
  * for the requested method/path) and, optionally, a plugin handler's own

@@ -36,6 +36,7 @@
 import Fastify from "fastify";
 import { createLogger } from "../../core/logger.js";
 import type { PluginLifecycleContext } from "../../core/loader.js";
+import { registerCsrfProtection } from "./src/csrf.js";
 import { registerErrorHandling } from "./src/error-handler.js";
 import {
   createRouteRegistrar,
@@ -43,6 +44,17 @@ import {
 } from "./src/route-capability.js";
 import { loadCookieConfig } from "./src/session-config.js";
 import { registerSessionCookies } from "./src/session.js";
+
+// Re-exported so a consuming plugin (or a test) can reference the CSRF
+// cookie/header names or the protection hook itself without reaching into
+// this plugin's `src/` internals — feature #64, see `./src/csrf.ts` for the
+// full contract.
+export {
+  CSRF_COOKIE_NAME,
+  CSRF_HEADER_NAME,
+  generateCsrfToken,
+  registerCsrfProtection,
+} from "./src/csrf.js";
 
 // Re-exported so a consuming plugin (or a test) can issue/verify signed
 // session cookies without reaching into this plugin's `src/` internals —
@@ -117,6 +129,16 @@ function buildApp(context: PluginLifecycleContext) {
   // ./src/session-config.ts's module docs on why this can't require
   // SESSION_SECRET to be configured yet, this early in boot.
   registerSessionCookies(built, loadCookieConfig());
+
+  // Wired before any route is registered (feature #64) so every
+  // state-changing route (POST/PUT/PATCH/DELETE) — every future
+  // registerRoute() call included — gets double-submit-cookie CSRF
+  // protection by default, with no per-route opt-in required. See
+  // ./src/csrf.ts's module docs on why registration order relative to
+  // registerSessionCookies (above) doesn't matter here (preHandler vs.
+  // onRequest), and ./src/route-capability.ts's `csrfExempt` option for the
+  // audited opt-out (step 2).
+  registerCsrfProtection(built);
 
   built.get("/health", async () => ({ status: "ok" }));
 

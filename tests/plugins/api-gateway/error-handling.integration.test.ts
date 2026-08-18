@@ -117,14 +117,46 @@ async function loadWithFixtureRoutes() {
   return getHttpRoute().getApp();
 }
 
+/**
+ * These `/widgets` POST requests exercise feature #60's error envelope, not
+ * feature #64's CSRF protection — but since feature #64, every
+ * state-changing route on the real api-gateway app requires a valid
+ * double-submit-cookie CSRF token by default (see
+ * `../../../src/plugins/api-gateway/src/csrf.ts`), `/widgets` included.
+ * This fetches a real token the same way a legitimate same-origin client
+ * would (a GET request first, then echoing the issued cookie back as the
+ * `x-csrf-token` header) so these tests keep exercising the envelope shape
+ * itself, not incidentally tripping over CSRF. See `csrf.test.ts` for the
+ * dedicated CSRF coverage, including the "no token at all" rejection case
+ * this helper deliberately avoids.
+ */
+async function fetchCsrfToken(app: Awaited<ReturnType<typeof loadWithFixtureRoutes>>): Promise<{
+  readonly cookie: string;
+  readonly token: string;
+}> {
+  const res = await app.inject({ method: "GET", url: "/health" });
+  const raw = res.headers["set-cookie"];
+  const header = (Array.isArray(raw) ? raw : [raw]).find(
+    (value): value is string => typeof value === "string" && value.startsWith("csrf_token="),
+  );
+  if (!header) {
+    throw new Error("expected a csrf_token Set-Cookie header in the response");
+  }
+  const cookie = header.split(";")[0] as string;
+  const token = cookie.slice("csrf_token=".length);
+  return { cookie, token };
+}
+
 describe("api-gateway — uniform 4xx/5xx error envelope (feature #60)", () => {
   it("a request that fails Fastify's own schema validation gets the exact {code, message, details} envelope, not Fastify's default shape", async () => {
     const app = await loadWithFixtureRoutes();
+    const { cookie, token } = await fetchCsrfToken(app);
 
     // Missing the required "name" field — fails the declared body schema.
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/widgets",
+      headers: { cookie, "x-csrf-token": token },
       payload: {},
     });
 
@@ -150,6 +182,7 @@ describe("api-gateway — uniform 4xx/5xx error envelope (feature #60)", () => {
 
   it("a wrong-type field violation is also rejected through the same uniform envelope", async () => {
     const app = await loadWithFixtureRoutes();
+    const { cookie, token } = await fetchCsrfToken(app);
 
     // "name" declared as a string; sending a nested object can't be
     // coerced to a string (unlike a bare number, which ajv's default
@@ -158,6 +191,7 @@ describe("api-gateway — uniform 4xx/5xx error envelope (feature #60)", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/widgets",
+      headers: { cookie, "x-csrf-token": token },
       payload: { name: { nested: true } },
     });
 
@@ -169,10 +203,12 @@ describe("api-gateway — uniform 4xx/5xx error envelope (feature #60)", () => {
 
   it("a valid request still passes straight through untouched by the error handler", async () => {
     const app = await loadWithFixtureRoutes();
+    const { cookie, token } = await fetchCsrfToken(app);
 
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/widgets",
+      headers: { cookie, "x-csrf-token": token },
       payload: { name: "gadget" },
     });
 

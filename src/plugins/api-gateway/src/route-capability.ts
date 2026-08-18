@@ -89,7 +89,34 @@ export interface RegisterRouteOptions {
    * versioning/deprecation policy this implements.
    */
   readonly version?: string;
+
+  /**
+   * Explicit, audited opt-out from CSRF protection (feature #64, step 2).
+   * Omit this for every ordinary route — by default, `registerRoute()`
+   * registers every route behind `./csrf.ts`'s double-submit-cookie
+   * protection (state-changing methods require a matching `x-csrf-token`
+   * header; safe methods are unaffected either way). Only set this for a
+   * route that is safe by construction regardless of CSRF — spec.md's own
+   * example: "pure JSON APIs with strict CORS + no cookies" — i.e. nothing
+   * that authenticates via an ambient browser credential (a cookie) a
+   * forged cross-site request could ride along on.
+   *
+   * `reason` must be a real, specific justification (at least
+   * {@link MIN_CSRF_EXEMPT_REASON_LENGTH} characters) — `registerRoute()`
+   * throws {@link ValidationError} if it's missing or too short to be a
+   * real explanation, and logs a warn-level line recording the route and
+   * the stated reason (this codebase's structured-logger audit trail, see
+   * `core/logger.ts`) every time an opt-out actually takes effect, so it
+   * shows up in operational logs alongside everywhere else CSRF protection
+   * would otherwise have applied.
+   */
+  readonly csrfExempt?: {
+    readonly reason: string;
+  };
 }
+
+/** Minimum length {@link RegisterRouteOptions.csrfExempt}'s `reason` must meet — see its docs. */
+export const MIN_CSRF_EXEMPT_REASON_LENGTH = 20;
 
 /** What `http:route` exposes for *registering* new routes — merged into `HttpRouteCapability` alongside `getApp()` in `../index.ts`. */
 export interface HttpRouteRegistrationCapability {
@@ -185,6 +212,33 @@ function assertDeclaresRequestAndResponseSchema(options: RegisterRouteOptions): 
 }
 
 /**
+ * Runtime backstop for {@link RegisterRouteOptions.csrfExempt}'s audit
+ * requirement (step 2) — see that field's docs and module docs on why this
+ * can't be type-checking alone (the same dynamic-`import()`-of-plugin-code
+ * reasoning as {@link assertDeclaresRequestAndResponseSchema}). A no-op when
+ * `csrfExempt` is omitted entirely, which is the overwhelming majority of
+ * routes.
+ */
+function assertValidCsrfExemptReason(options: RegisterRouteOptions): void {
+  if (options.csrfExempt === undefined) {
+    return;
+  }
+
+  const routeLabel = `${options.method} ${options.path}`;
+  const reason: unknown = options.csrfExempt.reason;
+
+  if (typeof reason !== "string" || reason.trim().length < MIN_CSRF_EXEMPT_REASON_LENGTH) {
+    throw new ValidationError(
+      `registerRoute("${routeLabel}"): csrfExempt.reason must be a real, specific justification of ` +
+        `at least ${MIN_CSRF_EXEMPT_REASON_LENGTH} characters explaining why this route is safe by ` +
+        `construction without CSRF protection (e.g. "pure JSON API behind strict CORS, authenticates ` +
+        `via bearer token only, never reads a cookie").`,
+      { details: { method: options.method, path: options.path, missing: "csrfExempt.reason" } },
+    );
+  }
+}
+
+/**
  * Build the `registerRoute` implementation `../index.ts` merges into its
  * `http:route` capability object. `getApp` is passed in (rather than a live
  * instance) so this module can be constructed once at module scope, exactly
@@ -197,14 +251,28 @@ export function createRouteRegistrar(getApp: () => ApiGatewayApp): HttpRouteRegi
   return {
     registerRoute(options: RegisterRouteOptions): void {
       assertDeclaresRequestAndResponseSchema(options);
+      assertValidCsrfExemptReason(options);
 
       const versionedPath = buildVersionedPath(options, options.version ?? DEFAULT_API_VERSION);
+
+      if (options.csrfExempt) {
+        // The audit trail half of the opt-out (see RegisterRouteOptions.csrfExempt's
+        // docs) — a structured, queryable record of every route that ever
+        // disabled CSRF protection and why, independent of whoever reads
+        // this source file later.
+        getApp().log.warn(
+          { method: options.method, path: versionedPath, reason: options.csrfExempt.reason },
+          `registerRoute("${options.method} ${versionedPath}"): CSRF protection explicitly disabled ` +
+            `for this route (audited opt-out, feature #64 step 2).`,
+        );
+      }
 
       getApp().route({
         method: options.method,
         url: versionedPath,
         schema: options.schema,
         handler: options.handler,
+        config: options.csrfExempt ? { csrfExempt: true } : undefined,
       } as AppRouteOptions);
     },
   };
