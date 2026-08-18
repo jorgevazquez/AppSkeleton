@@ -37,6 +37,8 @@ import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createLogger } from "../../core/logger.js";
 import type { PluginLifecycleContext } from "../../core/loader.js";
+import { loadCorsConfig } from "./src/cors-config.js";
+import { registerCors } from "./src/cors.js";
 import { registerCsrfProtection } from "./src/csrf.js";
 import { registerErrorHandling } from "./src/error-handler.js";
 import { loadRateLimitConfig } from "./src/rate-limit-config.js";
@@ -85,6 +87,13 @@ export {
 // instance without reaching into this plugin's `src/` internals — feature
 // #108, see `./src/request-id.ts` for the full contract.
 export { REQUEST_ID_HEADER, registerRequestId } from "./src/request-id.js";
+
+// Re-exported so a consuming plugin (or a test) can reference the CORS
+// allow-list config schema/loader, or wire CORS onto a standalone test
+// instance, without reaching into this plugin's `src/` internals — feature
+// #68, see `./src/cors-config.ts` and `./src/cors.ts` for the full contract.
+export { CorsConfigSchema, loadCorsConfig, type CorsConfig } from "./src/cors-config.js";
+export { registerCors } from "./src/cors.js";
 
 // Re-exported so a consuming plugin (or a test) can reference the global
 // rate-limit config schema/loader, or wire rate limiting onto a standalone
@@ -232,6 +241,16 @@ export async function buildApp(
   // an operator having configured any of them. See ./src/security-headers.ts
   // and ./src/security-headers-config.ts's module docs.
   await registerSecurityHeaders(built, loadSecurityHeadersConfig());
+
+  // Wired — and *awaited*, for the same `onRoute`-hook-timing reason as
+  // registerRateLimiting/registerSecurityHeaders above — before any route is
+  // registered (feature #68) so /health and every route a consumer plugin
+  // registers afterwards via registerRoute() is covered by the configured
+  // CORS allow-list. Loads CORS_ORIGIN unconditionally; an unconfigured
+  // deployment gets an empty allow-list, i.e. every cross-origin request is
+  // denied by default, rather than @fastify/cors's own permissive upstream
+  // default — see ./src/cors-config.ts and ./src/cors.ts's module docs.
+  await registerCors(built, loadCorsConfig());
 
   // Wired before any route is registered (feature #63) so `request.cookies`
   // is already populated and `reply.setCookie()` already carries the secure
