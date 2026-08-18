@@ -56,6 +56,28 @@
  * Skips itself (rather than failing) when MySQL isn't reachable, exactly
  * like every other integration suite in this repo — `npm test` stays green
  * without Docker; `init.sh`/CI always have it up.
+ *
+ * ## Addendum: feature #41's full-stack suite lives here too
+ *
+ * Feature #41 ("RBAC unit and integration test suite (policy engine,
+ * caching, persistence, audit)") step 1 asks for one suite that exercises
+ * "seeded roles, can() checks, cache invalidation, and audit trail
+ * together" against dockerized MySQL. The nested `describe` block at the
+ * bottom of this file — after the two feature #34 tests above — is that
+ * suite. It is deliberately appended here rather than living in its own
+ * file: every other RBAC integration suite that owns full DROP/CREATE
+ * lifecycle over these exact `rbac_*` table names (this file, and
+ * `rbac-default-roles-seed.integration.test.ts`) already accepts the
+ * "pre-existing architectural property" this file's own docs above call
+ * out — concurrently-scheduled vitest test *files* racing on the same
+ * literal tables. A third independent file doing its own CREATE/DROP here
+ * would add a new, unnecessary chance of that race actually firing (it did,
+ * during this feature's own development — see git history); reusing this
+ * file's already-serialized hooks and connecting only via fresh,
+ * feature41-prefixed rows (never a table CREATE/DROP of its own, and never
+ * one of the literal default-seed role/permission ids
+ * `rbac-default-roles-seed.integration.test.ts` asserts an *exact*,
+ * unscoped row count over) avoids introducing that risk at all.
  */
 import mysql from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -66,6 +88,14 @@ import {
   createDbQueryCapability,
   type DbQueryCapability,
 } from "../../src/plugins/database-mysql/src/query-capability.js";
+import { createInMemoryAuditSink, type InMemoryAuditSink } from "../../src/core/audit.js";
+import { createCapabilityBroker } from "../../src/core/broker.js";
+import { loadPlugins, type PluginDefinition } from "../../src/core/loader.js";
+import type { PluginManifest } from "../../src/core/manifest.js";
+import { isOk } from "../../src/core/types.js";
+import * as rbacModule from "../../src/plugins/rbac/index.js";
+import type { RbacCheckCapability } from "../../src/plugins/rbac/index.js";
+import type { RbacManagementApi } from "../../src/plugins/rbac/src/manage.js";
 import { can } from "../../src/plugins/rbac/src/policy.js";
 import { createRbacStore } from "../../src/plugins/rbac/src/store.js";
 import * as createRoles from "../../src/plugins/rbac/src/migrations/0001_create_rbac_roles.js";
@@ -227,5 +257,253 @@ describe.runIf(mysqlReachable)("rbac — persistent storage integration (feature
       // here, regardless of outcome.
       await restarted.db.destroy();
     }
+  });
+
+  /**
+   * Feature #41 — "RBAC unit and integration test suite (policy engine,
+   * caching, persistence, audit)", step 1: one suite exercising seeded
+   * roles, `can()` checks, cache invalidation, and the audit trail
+   * together — see this file's module doc "Addendum" section above for why
+   * this lives nested here instead of its own file.
+   *
+   * Every fixture id below is `feature41-`-prefixed — distinct from this
+   * file's own `feature34-*` ids above and from
+   * `rbac-default-roles-seed.integration.test.ts`'s literal
+   * `admin`/`editor`/`viewer`/`rbac:manage`/`wiki:*` ids — so this suite's
+   * real MySQL rows can never collide with either sibling suite's data or
+   * exact-row-count assertions, no matter how vitest schedules the three
+   * files relative to one another.
+   *
+   * The one exception is the `"rbac:manage"` grant driving this suite's
+   * `rbac:manage` mutation below: mirroring
+   * `manage-capability.test.ts`'s own precedent, that grant is pushed
+   * directly into `rbacModule.policyStore` (in-memory only, never written
+   * to the real `rbac_permissions` table) — `index.ts`'s `assertCanManage`
+   * reads `check()`'s in-memory policy state, not the database, so no real
+   * row with that literal, shared id is ever needed here.
+   */
+  describe("rbac — full-stack integration (feature #41)", () => {
+    const ADMIN = "feature41-admin";
+    const EDITOR = "feature41-editor";
+    const OUTSIDER = "feature41-outsider";
+    const ADMIN_ROLE = "feature41-admin-role";
+    const EDITOR_ROLE = "feature41-editor-role";
+    const WRITE_PERMISSION = "feature41-wiki:write";
+    const READ_PERMISSION = "feature41-wiki:read";
+
+    function manifest(id: string, provides: string[]): PluginManifest {
+      return {
+        id,
+        version: "1.0.0",
+        depends_on: {},
+        capabilities: { provides, requires: [] },
+        entry_point: "index.ts",
+      };
+    }
+
+    /** Load the real rbac plugin through the real broker/loader, wired to a fresh audit sink. */
+    async function loadRbac(): Promise<{
+      check: RbacCheckCapability["check"];
+      manage: RbacManagementApi;
+      auditSink: InMemoryAuditSink;
+    }> {
+      const auditSink = createInMemoryAuditSink();
+      const definitions: PluginDefinition[] = [
+        { manifest: manifest("rbac", ["rbac:check", "rbac:manage"]), module: rbacModule },
+      ];
+      const broker = createCapabilityBroker();
+
+      const loadResult = await loadPlugins(definitions, broker, { auditSink });
+      expect(isOk(loadResult)).toBe(true);
+      if (!isOk(loadResult)) {
+        throw new Error("expected rbac to load successfully");
+      }
+      expect(loadResult.value.failed).toEqual([]);
+
+      const check = (rbacModule.provides?.["rbac:check"] as RbacCheckCapability).check;
+      const manage = rbacModule.provides?.["rbac:manage"] as RbacManagementApi;
+      return { check, manage, auditSink };
+    }
+
+    afterAll(() => {
+      rbacModule.resetPolicyStoreForTests();
+    });
+
+    it("seeded roles persisted in real MySQL, fed through loadPolicyStore(), drive correct check() decisions — cached, and every decision audited", async () => {
+      rbacModule.resetPolicyStoreForTests();
+
+      // "Seeded roles": real inserts through the real, db:query-backed
+      // RbacStore, against real dockerized MySQL — a fresh connection, own
+      // to this test, independent of `setup`/`restarted` above (both
+      // already destroyed by the earlier feature #34 tests).
+      const fixture = connect();
+      try {
+        const store = createRbacStore(fixture.queryCapability);
+        await store.createRole({ id: ADMIN_ROLE, name: "Feature 41 Admin" });
+        await store.createRole({ id: EDITOR_ROLE, name: "Feature 41 Editor" });
+        await store.createPermission({
+          id: WRITE_PERMISSION,
+          resource: "feature41-wiki",
+          action: "write",
+        });
+        await store.createPermission({
+          id: READ_PERMISSION,
+          resource: "feature41-wiki",
+          action: "read",
+        });
+        await store.assignPermissionToRole(EDITOR_ROLE, WRITE_PERMISSION);
+        await store.assignPermissionToRole(EDITOR_ROLE, READ_PERMISSION);
+        await store.assignRoleToUser(ADMIN, ADMIN_ROLE);
+        await store.assignRoleToUser(EDITOR, EDITOR_ROLE);
+        // OUTSIDER deliberately gets no role at all — deny-by-default coverage.
+
+        // "Persistence": read the same data back through a *different*
+        // freshly-built store/connection, proving it round-tripped through
+        // real MySQL rather than being served from anything still held in
+        // JS memory from the writes above.
+        const reread = connect();
+        let persisted;
+        try {
+          persisted = await createRbacStore(reread.queryCapability).loadPolicyStore();
+        } finally {
+          await reread.db.destroy();
+        }
+        expect(persisted.rolePermissions).toEqual(
+          expect.arrayContaining([
+            { roleId: EDITOR_ROLE, permissionId: WRITE_PERMISSION },
+            { roleId: EDITOR_ROLE, permissionId: READ_PERMISSION },
+          ]),
+        );
+        expect(persisted.userRoles).toEqual(
+          expect.arrayContaining([
+            { userId: ADMIN, roleId: ADMIN_ROLE },
+            { userId: EDITOR, roleId: EDITOR_ROLE },
+          ]),
+        );
+
+        // Hydrate the plugin's in-memory policyStore from the DB-backed
+        // snapshot — the "feed the result into policyStore" path
+        // index.ts's own module doc anticipates for a future feature — plus
+        // ADMIN's purely in-memory "rbac:manage" grant (see this describe
+        // block's own doc comment for why that one grant is never a real
+        // row).
+        rbacModule.policyStore.userRoles.push(...persisted.userRoles);
+        rbacModule.policyStore.rolePermissions.push(...persisted.rolePermissions);
+        rbacModule.roleCatalog.set(ADMIN_ROLE, { id: ADMIN_ROLE, name: "Feature 41 Admin" });
+        rbacModule.policyStore.rolePermissions.push({
+          roleId: ADMIN_ROLE,
+          permissionId: "rbac:manage",
+        });
+
+        // "can() checks", through the real, cached, audited check()
+        // capability — never `can()` directly.
+        const { check, auditSink } = await loadRbac();
+
+        expect(check(EDITOR, "write", "feature41-wiki")).toBe(true);
+        expect(check(EDITOR, "read", "feature41-wiki")).toBe(true);
+        expect(check(ADMIN, "manage", "rbac")).toBe(true);
+        expect(check(ADMIN, "write", "feature41-wiki")).toBe(false);
+        expect(check(OUTSIDER, "read", "feature41-wiki")).toBe(false);
+
+        // "Audit trail": every decision above, queryable by actor/outcome.
+        expect(auditSink.query({ actor: EDITOR, outcome: "allowed" })).toHaveLength(2);
+        expect(auditSink.query({ actor: ADMIN, outcome: "allowed" })).toHaveLength(1);
+        expect(auditSink.query({ actor: ADMIN, outcome: "denied" })).toHaveLength(1);
+        expect(auditSink.query({ actor: OUTSIDER, outcome: "denied" })).toHaveLength(1);
+
+        // Repeating the exact same check is a cache hit (feature #35) but
+        // still fully audited (feature #38) — caching is purely a
+        // can()-computation optimization, invisible to the audit trail.
+        const cacheKey = JSON.stringify([EDITOR, "write", "feature41-wiki"]);
+        const cached = rbacModule.checkCacheState.entries.get(cacheKey);
+        expect(cached).toEqual({ allowed: true, expiresAt: expect.any(Number) });
+
+        expect(check(EDITOR, "write", "feature41-wiki")).toBe(true);
+        expect(
+          auditSink.query({
+            actor: EDITOR,
+            action: "write",
+            target: "feature41-wiki",
+            outcome: "allowed",
+          }),
+        ).toHaveLength(2);
+      } finally {
+        await fixture.db.destroy();
+      }
+    });
+
+    it("cache invalidation: a real rbac:manage mutation immediately changes the next check() decision, not after the TTL", async () => {
+      rbacModule.resetPolicyStoreForTests();
+
+      // Fresh, independent set of feature41-prefixed rows — this test does
+      // not depend on the previous one having run.
+      const roleId = "feature41-editor-role-2";
+      const permissionId = "feature41-wiki:comment";
+      const adminRoleId = "feature41-admin-role-2";
+      const editor = "feature41-editor-2";
+      const admin = "feature41-admin-2";
+
+      const fixture = connect();
+      try {
+        const store = createRbacStore(fixture.queryCapability);
+        await store.createRole({ id: roleId, name: "Feature 41 Editor 2" });
+        await store.createPermission({
+          id: permissionId,
+          resource: "feature41-wiki",
+          action: "comment",
+        });
+        await store.assignPermissionToRole(roleId, permissionId);
+        await store.assignRoleToUser(editor, roleId);
+
+        const persisted = await store.loadPolicyStore();
+        rbacModule.policyStore.userRoles.push(...persisted.userRoles);
+        rbacModule.policyStore.rolePermissions.push(...persisted.rolePermissions);
+        rbacModule.roleCatalog.set(adminRoleId, { id: adminRoleId, name: "Feature 41 Admin 2" });
+        rbacModule.policyStore.userRoles.push({ userId: admin, roleId: adminRoleId });
+        rbacModule.policyStore.rolePermissions.push({
+          roleId: adminRoleId,
+          permissionId: "rbac:manage",
+        });
+
+        const { check, manage, auditSink } = await loadRbac();
+
+        // First call: cache miss, populates checkCacheState; also proves
+        // the seeded-and-persisted grant actually allows.
+        expect(check(editor, "comment", "feature41-wiki")).toBe(true);
+
+        // Real rbac:manage mutation (feature #36), authorized by this
+        // suite's own in-memory-only "rbac:manage" grant — not a direct
+        // invalidateCheckCache() call.
+        await manage.revokePermissionFromRole(admin, roleId, permissionId);
+
+        // The very next check for the exact same triple that was cached
+        // `true` above already reflects the revoke.
+        expect(check(editor, "comment", "feature41-wiki")).toBe(false);
+        expect(
+          auditSink.query({
+            actor: editor,
+            action: "comment",
+            target: "feature41-wiki",
+            outcome: "denied",
+          }),
+        ).toHaveLength(1);
+
+        // The real MySQL row this suite wrote is untouched by the in-memory
+        // management mutation — rbac:manage's current backing store has not
+        // been wired to store.ts's DB-backed layer (see index.ts's own
+        // docs). A brand-new connection still sees the original grant.
+        const fresh = connect();
+        try {
+          const rolePermissions = await createRbacStore(
+            fresh.queryCapability,
+          ).listRolePermissions();
+          expect(rolePermissions).toEqual(expect.arrayContaining([{ roleId, permissionId }]));
+        } finally {
+          await fresh.db.destroy();
+        }
+      } finally {
+        await fixture.db.destroy();
+      }
+    });
   });
 });
