@@ -44,6 +44,8 @@ import {
   createRouteRegistrar,
   type HttpRouteRegistrationCapability,
 } from "./src/route-capability.js";
+import { loadSecurityHeadersConfig } from "./src/security-headers-config.js";
+import { registerSecurityHeaders } from "./src/security-headers.js";
 import { loadCookieConfig } from "./src/session-config.js";
 import { registerSessionCookies } from "./src/session.js";
 
@@ -88,6 +90,18 @@ export {
 } from "./src/rate-limit-config.js";
 export { registerRateLimiting } from "./src/rate-limit.js";
 
+// Re-exported so a consuming plugin (or a test) can reference the
+// security-headers config schema/loader, or wire helmet onto a standalone
+// test instance, without reaching into this plugin's `src/` internals —
+// feature #67, see `./src/security-headers-config.ts` and
+// `./src/security-headers.ts` for the full contract.
+export {
+  SecurityHeadersConfigSchema,
+  loadSecurityHeadersConfig,
+  type SecurityHeadersConfig,
+} from "./src/security-headers-config.js";
+export { registerSecurityHeaders } from "./src/security-headers.js";
+
 // Re-exported so a consuming plugin can type-only import everything it
 // needs for `capabilities.obtain<HttpRouteCapability>("http:route")` calls
 // (schema shape, handler signature, etc.) from this one module, the same
@@ -122,21 +136,24 @@ export { DEFAULT_API_VERSION } from "./src/route-capability.js";
  * default-generic `FastifyInstance`.
  *
  * Async — unlike the rest of this module's setup — solely because
- * `registerRateLimiting()` (feature #66) must be *awaited* before any route
- * is registered: `@fastify/rate-limit` intercepts routes via Fastify's
- * `onRoute` hook, which fires synchronously at `app.route()`/`app.get()`
- * call time using whatever `onRoute` hooks already exist *at that instant*
- * — unlike `onRequest`/`preHandler` hooks (used by `registerSessionCookies`/
- * `registerCsrfProtection` below), it is not compiled lazily against every
- * route once `.ready()` runs. Since `app.register()`'s own plugin body
- * only actually executes once its promise is awaited (or the instance
- * boots), a fire-and-forget `void app.register(fastifyRateLimit, ...)`
- * followed immediately by a synchronous `built.get("/health", ...)` would
- * silently register `/health` (and, by the same ordering, whatever route a
- * consumer plugin registers next) with no rate limiting applied at all —
- * see `./src/rate-limit.ts`'s module docs for the full explanation and
+ * `registerRateLimiting()` (feature #66) and `registerSecurityHeaders()`
+ * (feature #67) must be *awaited* before any route is registered:
+ * `@fastify/rate-limit` and `@fastify/helmet` both intercept routes via
+ * Fastify's `onRoute` hook, which fires synchronously at
+ * `app.route()`/`app.get()` call time using whatever `onRoute` hooks already
+ * exist *at that instant* — unlike `onRequest`/`preHandler` hooks (used by
+ * `registerSessionCookies`/`registerCsrfProtection` below), it is not
+ * compiled lazily against every route once `.ready()` runs. Since
+ * `app.register()`'s own plugin body only actually executes once its
+ * promise is awaited (or the instance boots), a fire-and-forget
+ * `void app.register(fastifyRateLimit, ...)` followed immediately by a
+ * synchronous `built.get("/health", ...)` would silently register `/health`
+ * (and, by the same ordering, whatever route a consumer plugin registers
+ * next) with no rate limiting/per-route helmet override applied at all —
+ * see `./src/rate-limit.ts`'s and `./src/security-headers.ts`'s module docs
+ * for the full explanation and
  * `../../../tests/plugins/api-gateway/rate-limit.test.ts` for the
- * regression this guards against. `onEnable` below awaits this function
+ * regression this guards against. `onEnable` below awaits both functions
  * for exactly that reason.
  */
 async function buildApp(context: PluginLifecycleContext) {
@@ -166,6 +183,19 @@ async function buildApp(context: PluginLifecycleContext) {
   // this function — see this function's own module docs above and
   // ./src/rate-limit.ts's module docs for why.
   await registerRateLimiting(built, loadRateLimitConfig());
+
+  // Wired — and *awaited*, for the same `onRoute`-hook-timing reason as
+  // registerRateLimiting above — before any route is registered (feature
+  // #67) so /health and every route a consumer plugin registers afterwards
+  // via registerRoute() gets a sensible-default set of security response
+  // headers (CSP, HSTS, X-Frame-Options, etc.) unless the deployment
+  // explicitly configures otherwise. Loads
+  // HELMET_ENABLED/HELMET_CSP_ENABLED/HELMET_HSTS_ENABLED/
+  // HELMET_HSTS_MAX_AGE unconditionally — like loadRateLimitConfig above,
+  // every field has a safe default, so the server can always boot without
+  // an operator having configured any of them. See ./src/security-headers.ts
+  // and ./src/security-headers-config.ts's module docs.
+  await registerSecurityHeaders(built, loadSecurityHeadersConfig());
 
   // Wired before any route is registered (feature #63) so `request.cookies`
   // is already populated and `reply.setCookie()` already carries the secure

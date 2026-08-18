@@ -864,7 +864,7 @@
       "Write a test asserting the expected security headers are present on responses"
     ],
     "depends_on": [58],
-    "passes": false
+    "passes": true
   },
   {
     "id": 68,
