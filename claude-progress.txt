@@ -1208,3 +1208,26 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - docs/rate-limiting.md (operator-facing tuning doc) is a SEPARATE feature (~#100+, 'Document and tune default rate-limit / DoS mitigation settings') and was intentionally left for that feature, per this feature's own step list.
 - Future agents: if you add another @fastify/* plugin that relies on an onRoute (not onRequest/preHandler) hook, you MUST await its app.register() before any route is declared, or it will silently no-op -- see rate-limit.ts's and api-gateway/index.ts's buildApp() module docs for the full explanation, and don't trust that 'it compiles' means 'it works' for this specific class of bug.
 - RegisterRouteOptions.rateLimit intentionally does not validate that a per-route override is actually 'stricter' than the global default -- @fastify/rate-limit has no such concept, so nothing enforces it at runtime; documented as caller responsibility.
+
+---
+
+## 2026-08-18 03:15 — Feature #67: Security headers (CSP, HSTS, X-Frame-Options, etc.) via helmet
+
+### What was done:
+- Added src/plugins/api-gateway/src/security-headers-config.ts: zod-validated SecurityHeadersConfig (HELMET_ENABLED, HELMET_CSP_ENABLED, HELMET_HSTS_ENABLED, HELMET_HSTS_MAX_AGE), using the kernel's loadConfig() layered engine, mirroring rate-limit-config.ts's pattern.
+- Added src/plugins/api-gateway/src/security-headers.ts: registerSecurityHeaders(app, config) wires @fastify/helmet (already a dependency) with helmet's own sensible default directives (CSP default-src 'self', HSTS, X-Frame-Options SAMEORIGIN, X-Content-Type-Options nosniff, etc.), independently toggling CSP/HSTS and a master HELMET_ENABLED kill switch. Async and awaited (like registerRateLimiting) because @fastify/helmet also adds an onRoute hook for per-route overrides, which only exists once its registration promise resolves.
+- Wired registerSecurityHeaders(built, loadSecurityHeadersConfig()) into api-gateway/index.ts's buildApp(), awaited right after registerRateLimiting and before registerSessionCookies/registerCsrfProtection/the /health route, so every route (built-in and consumer-registered via registerRoute()) is covered from the start.
+- Re-exported SecurityHeadersConfigSchema/loadSecurityHeadersConfig/SecurityHeadersConfig/registerSecurityHeaders from api-gateway/index.ts, matching the rate-limit/session re-export pattern.
+- Added HELMET_ENABLED/HELMET_CSP_ENABLED/HELMET_HSTS_ENABLED/HELMET_HSTS_MAX_AGE to .env.example with their secure-by-default values.
+
+### Testing:
+- tests/plugins/api-gateway/security-headers-config.test.ts: defaults, env overrides, boolean-string coercion, ConfigError on malformed values (22 assertions total across both new test files).
+- tests/plugins/api-gateway/security-headers.test.ts: drives a standalone Fastify instance (registerErrorHandling + registerSecurityHeaders, mirroring rate-limit.test.ts's pattern) and asserts via app.inject() that responses carry Content-Security-Policy, Strict-Transport-Security (with configured max-age), X-Frame-Options: SAMEORIGIN, and X-Content-Type-Options: nosniff; confirms headers apply globally (/health included, no per-route opt-in needed); and verifies each config toggle (HELMET_ENABLED/HELMET_CSP_ENABLED/HELMET_HSTS_ENABLED) independently removes only its own header(s).
+- Ran full suite: npx vitest run -> 947/947 passing outside src/plugins/database-mysql (which has 6-9 pre-existing MigrationError failures unrelated to this change — confirmed via git status showing zero touched files there, and the same failures reproduce identically running tests/plugins/database-mysql alone before and after this feature's changes; claude-progress.txt's feature #38 entry already flags this as a known pre-existing schema_migrations race).
+- npm run build (tsc) passes — had to fix an exactOptionalPropertyTypes: true violation by conditionally spreading contentSecurityPolicy: false into the options object instead of assigning undefined.
+- npm run lint passes clean.
+
+### Notes:
+- @fastify/helmet was already a declared dependency (package.json) but unused before this feature.
+- Kept the config surface intentionally small (4 fields) rather than exposing full per-directive CSP overrides — HELMET_CSP_ENABLED/HELMET_HSTS_ENABLED let an operator drop the single header most likely to conflict with their deployment (CSP for inline scripts/embeds, HSTS for non-TLS local dev) without losing the rest of helmet's defaults. A future feature could add a CSP-directives override (e.g. JSON env var) if a real deployment needs it.
+- html-renderer's asset/template pipeline (feature #51 etc.) isn't wired into a live HTTP route yet, so there's no current conflict between the default CSP and any inline-script/style usage to test against — worth revisiting once html-renderer routes are mounted through http:route.
