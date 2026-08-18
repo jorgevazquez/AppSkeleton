@@ -101,6 +101,13 @@ import type { AuditSink } from "../../core/audit.js";
 import { NotFoundError, ValidationError } from "../../core/errors.js";
 import type { PluginLifecycleContext } from "../../core/loader.js";
 import {
+  createConsoleBootstrapAdminReporter,
+  ensureBootstrapAdmin,
+  type BootstrapAdminCredential,
+  type BootstrapAdminReporter,
+  type BootstrapAdminStore,
+} from "./src/bootstrap-admin.js";
+import {
   createRbacManagementApi,
   type RbacManagementApi,
   type RbacManagementStore,
@@ -460,12 +467,13 @@ function check(userId: string, action: string, resource: string): boolean {
 /**
  * Copies the kernel's real audit sink (`loader.ts`'s
  * `PluginLifecycleContext.auditSink`, feature #38) into {@link auditState}
- * so every subsequent `check()` call is audited. The only lifecycle hook
- * this plugin needs — `check()` itself remains a stable closure over
- * {@link policyStore}/{@link auditState} from the moment this module is
- * imported, exactly as before this feature; this hook exists solely to
- * receive the one piece of kernel-provided context (the sink) that isn't
- * available at module-import time.
+ * so every subsequent `check()` call is audited. Until feature #40, this
+ * was the only lifecycle hook this plugin needed — `check()` itself remains
+ * a stable closure over {@link policyStore}/{@link auditState} from the
+ * moment this module is imported; this hook exists solely to receive the
+ * one piece of kernel-provided context (the sink) that isn't available at
+ * module-import time. See {@link onEnable} below for the second hook
+ * feature #40 added.
  */
 export function onInstall(context: PluginLifecycleContext): void {
   auditState.sink = context.auditSink;
@@ -474,16 +482,19 @@ export function onInstall(context: PluginLifecycleContext): void {
 /**
  * Registered with the broker before this module's lifecycle hooks run (see
  * `loader.ts`'s declare-before-hooks ordering). Neither `rbac:check` nor
- * `rbac:manage` needs per-instance construction (unlike api-gateway's
- * Fastify instance, which needs `onEnable`) — `check()` is a stable closure
- * over {@link policyStore} from the moment this module is imported, and
- * {@link managementApi} (feature #36) is built once, at module scope, over
- * the in-memory adapter {@link createInMemoryManagementStore} returns —
- * itself a closure over the same module-level state — plus `check` as its
+ * `rbac:manage` needs per-instance construction the way api-gateway's
+ * Fastify instance does — `check()` is a stable closure over {@link
+ * policyStore} from the moment this module is imported, and {@link
+ * managementApi} (feature #36) is built once, at module scope, over the
+ * in-memory adapter {@link createInMemoryManagementStore} returns — itself
+ * a closure over the same module-level state — plus `check` as its
  * self-referential authorizer; `provides` is therefore built at module
- * scope here, same as before {@link onInstall} existed.
+ * scope here, same as before {@link onInstall} existed. (This plugin's
+ * {@link onEnable} hook below exists for a different reason entirely —
+ * feature #40's bootstrap-admin check — not for constructing `provides`.)
  */
-const managementApi: RbacManagementApi = createRbacManagementApi(createInMemoryManagementStore(), {
+const inMemoryManagementStore = createInMemoryManagementStore();
+const managementApi: RbacManagementApi = createRbacManagementApi(inMemoryManagementStore, {
   check,
 });
 
@@ -491,3 +502,50 @@ export const provides: Readonly<Record<string, unknown>> = {
   "rbac:check": { check } satisfies RbacCheckCapability,
   "rbac:manage": managementApi,
 };
+
+/**
+ * The {@link BootstrapAdminStore} feature #40's safety mechanism reads/
+ * mutates — the same in-memory {@link policyStore}/{@link roleCatalog}
+ * state `check()` and `rbac:manage` already read/mutate (via {@link
+ * inMemoryManagementStore}), plus a direct read of {@link
+ * policyStore.userRoles} for "does any admin exist" (not part of {@link
+ * RbacManagementStore}'s own contract — feature #36 never needed it). A
+ * provisioned bootstrap admin is therefore immediately usable through this
+ * plugin's real `check()`/`rbac:manage`, exactly like any other role
+ * assignment.
+ */
+export const bootstrapAdminStore: BootstrapAdminStore = {
+  listUserRoles: () => policyStore.userRoles,
+  getRole: (id) => inMemoryManagementStore.getRole(id),
+  createRole: (role) => inMemoryManagementStore.createRole(role),
+  assignPermissionToRole: (roleId, permissionId) =>
+    inMemoryManagementStore.assignPermissionToRole(roleId, permissionId),
+  assignRoleToUser: (userId, roleId) => inMemoryManagementStore.assignRoleToUser(userId, roleId),
+};
+
+/**
+ * Runs feature #40's bootstrap-admin safety mechanism against this
+ * plugin's own state. Exported (not just called from {@link onEnable})
+ * so a caller — production boot, or a test simulating first-run vs.
+ * already-provisioned states — can supply its own {@link
+ * BootstrapAdminReporter} and inspect the returned credential directly,
+ * without capturing real `console.warn` output. Defaults to {@link
+ * createConsoleBootstrapAdminReporter}'s real, human-facing banner.
+ */
+export async function ensureRbacBootstrapAdmin(
+  reporter: BootstrapAdminReporter = createConsoleBootstrapAdminReporter(),
+): Promise<BootstrapAdminCredential | undefined> {
+  return ensureBootstrapAdmin(bootstrapAdminStore, reporter);
+}
+
+/**
+ * The loader's second lifecycle hook (feature #40) — runs after {@link
+ * onInstall}. Unlike `onInstall`, this hook needs none of {@link
+ * PluginLifecycleContext}'s fields; it exists solely so the loader's
+ * declare-before-hooks ordering gives this plugin one guaranteed
+ * "just finished loading" moment per `loadPlugins()` call to check
+ * "does an admin exist yet" and self-heal if not.
+ */
+export async function onEnable(_context: PluginLifecycleContext): Promise<void> {
+  await ensureRbacBootstrapAdmin();
+}
