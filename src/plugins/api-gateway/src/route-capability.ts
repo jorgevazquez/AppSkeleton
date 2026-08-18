@@ -28,6 +28,7 @@
  * is the runtime backstop that makes step 2 ("enforce") hold regardless of
  * whether the caller went through TypeScript's type checker at all.
  */
+import type { RateLimitOptions } from "@fastify/rate-limit";
 import { ValidationError } from "../../../core/errors.js";
 import type { ApiGatewayApp } from "../index.js";
 
@@ -113,6 +114,26 @@ export interface RegisterRouteOptions {
   readonly csrfExempt?: {
     readonly reason: string;
   };
+
+  /**
+   * Per-route override of api-gateway's global rate-limit defaults
+   * (feature #66, step 1 — "support for stricter per-route overrides").
+   * Omit this for every ordinary route — by default, `registerRoute()`
+   * leaves the route on `@fastify/rate-limit`'s global config, wired once
+   * in `../index.ts`'s `buildApp()` from `RATE_LIMIT_MAX`/
+   * `RATE_LIMIT_WINDOW_MS` (see `./rate-limit-config.ts`). Pass a partial
+   * `@fastify/rate-limit` options object (typically just `{ max, timeWindow
+   * }`) to tighten the limit for a specific route — e.g. a login or
+   * password-reset endpoint that should throttle far more aggressively than
+   * the rest of the API — any field left unset still falls back to the
+   * global default (`@fastify/rate-limit` deep-merges route-level config
+   * over its global settings, see `./rate-limit.ts`'s module docs). Pass
+   * the literal `false` to disable rate limiting for this route entirely.
+   * Nothing here enforces that an override is actually *stricter* than the
+   * global default — `@fastify/rate-limit` has no such concept to validate
+   * against — it is on the caller to pass a tighter value.
+   */
+  readonly rateLimit?: RateLimitOptions | false;
 }
 
 /** Minimum length {@link RegisterRouteOptions.csrfExempt}'s `reason` must meet — see its docs. */
@@ -267,12 +288,20 @@ export function createRouteRegistrar(getApp: () => ApiGatewayApp): HttpRouteRegi
         );
       }
 
+      const routeConfig: { csrfExempt?: true; rateLimit?: RateLimitOptions | false } = {};
+      if (options.csrfExempt) {
+        routeConfig.csrfExempt = true;
+      }
+      if (options.rateLimit !== undefined) {
+        routeConfig.rateLimit = options.rateLimit;
+      }
+
       getApp().route({
         method: options.method,
         url: versionedPath,
         schema: options.schema,
         handler: options.handler,
-        config: options.csrfExempt ? { csrfExempt: true } : undefined,
+        config: Object.keys(routeConfig).length > 0 ? routeConfig : undefined,
       } as AppRouteOptions);
     },
   };

@@ -38,6 +38,8 @@ import { createLogger } from "../../core/logger.js";
 import type { PluginLifecycleContext } from "../../core/loader.js";
 import { registerCsrfProtection } from "./src/csrf.js";
 import { registerErrorHandling } from "./src/error-handler.js";
+import { loadRateLimitConfig } from "./src/rate-limit-config.js";
+import { registerRateLimiting } from "./src/rate-limit.js";
 import {
   createRouteRegistrar,
   type HttpRouteRegistrationCapability,
@@ -74,6 +76,18 @@ export {
   type SessionConfig,
 } from "./src/session-config.js";
 
+// Re-exported so a consuming plugin (or a test) can reference the global
+// rate-limit config schema/loader, or wire rate limiting onto a standalone
+// test instance, without reaching into this plugin's `src/` internals —
+// feature #66, see `./src/rate-limit-config.ts` and `./src/rate-limit.ts`
+// for the full contract.
+export {
+  RateLimitConfigSchema,
+  loadRateLimitConfig,
+  type RateLimitConfig,
+} from "./src/rate-limit-config.js";
+export { registerRateLimiting } from "./src/rate-limit.js";
+
 // Re-exported so a consuming plugin can type-only import everything it
 // needs for `capabilities.obtain<HttpRouteCapability>("http:route")` calls
 // (schema shape, handler signature, etc.) from this one module, the same
@@ -106,8 +120,26 @@ export { DEFAULT_API_VERSION } from "./src/route-capability.js";
  * contravariantly in `LoggerType`) — so anything holding onto this instance
  * elsewhere in this module must use this exact inferred type, not a
  * default-generic `FastifyInstance`.
+ *
+ * Async — unlike the rest of this module's setup — solely because
+ * `registerRateLimiting()` (feature #66) must be *awaited* before any route
+ * is registered: `@fastify/rate-limit` intercepts routes via Fastify's
+ * `onRoute` hook, which fires synchronously at `app.route()`/`app.get()`
+ * call time using whatever `onRoute` hooks already exist *at that instant*
+ * — unlike `onRequest`/`preHandler` hooks (used by `registerSessionCookies`/
+ * `registerCsrfProtection` below), it is not compiled lazily against every
+ * route once `.ready()` runs. Since `app.register()`'s own plugin body
+ * only actually executes once its promise is awaited (or the instance
+ * boots), a fire-and-forget `void app.register(fastifyRateLimit, ...)`
+ * followed immediately by a synchronous `built.get("/health", ...)` would
+ * silently register `/health` (and, by the same ordering, whatever route a
+ * consumer plugin registers next) with no rate limiting applied at all —
+ * see `./src/rate-limit.ts`'s module docs for the full explanation and
+ * `../../../tests/plugins/api-gateway/rate-limit.test.ts` for the
+ * regression this guards against. `onEnable` below awaits this function
+ * for exactly that reason.
  */
-function buildApp(context: PluginLifecycleContext) {
+async function buildApp(context: PluginLifecycleContext) {
   const built = Fastify({
     loggerInstance: createLogger({
       level: context.logger.level,
@@ -121,6 +153,19 @@ function buildApp(context: PluginLifecycleContext) {
   // schema-validation failures, and unmatched routes alike — see
   // ./src/error-handler.ts's module docs.
   registerErrorHandling(built);
+
+  // Wired — and *awaited* — before any route is registered (feature #66)
+  // so every route, /health included, plus every route a consumer plugin
+  // registers afterwards via registerRoute(), is covered by the global
+  // rate-limit defaults unless it opts into a stricter per-route override
+  // (route-capability.ts's `rateLimit` option). Loads
+  // RATE_LIMIT_MAX/RATE_LIMIT_WINDOW_MS unconditionally, the same way
+  // registerSessionCookies below loads COOKIE_SECURE unconditionally — both
+  // have safe defaults, so the server can always boot without an operator
+  // having configured either. Must be awaited, unlike every other call in
+  // this function — see this function's own module docs above and
+  // ./src/rate-limit.ts's module docs for why.
+  await registerRateLimiting(built, loadRateLimitConfig());
 
   // Wired before any route is registered (feature #63) so `request.cookies`
   // is already populated and `reply.setCookie()` already carries the secure
@@ -145,8 +190,8 @@ function buildApp(context: PluginLifecycleContext) {
   return built;
 }
 
-/** The exact Fastify instance type {@link buildApp} produces — see its docs. */
-export type ApiGatewayApp = ReturnType<typeof buildApp>;
+/** The exact Fastify instance type {@link buildApp} produces — see its docs. `Awaited` because `buildApp` is itself async (see its docs). */
+export type ApiGatewayApp = Awaited<ReturnType<typeof buildApp>>;
 
 /**
  * What api-gateway registers with the broker under the `http:route`
@@ -212,9 +257,17 @@ export const provides: Readonly<Record<string, unknown>> = {
  * up duplicating `module`-shaped fields instead of cleanly setting `module:
  * "http"`. The child logger's `level` is carried over so HTTP logs match the
  * rest of the kernel's configured verbosity.
+ *
+ * Async (returns `Promise<void>`, awaited) because `buildApp` itself is now
+ * async — see its docs (feature #66). The loader (`loader.ts`) already
+ * `await`s every plugin's `onEnable` before moving on to the next plugin in
+ * dependency order, so this doesn't change when `getApp()` first becomes
+ * safe to call for a dependent plugin's own `onEnable` — it's still only
+ * ever reachable once this plugin's entire `onEnable`, rate-limit
+ * registration included, has fully completed.
  */
-export function onEnable(context: PluginLifecycleContext): void {
-  app = buildApp(context);
+export async function onEnable(context: PluginLifecycleContext): Promise<void> {
+  app = await buildApp(context);
 }
 
 /** Release the Fastify instance's own resources and clear the module-level reference. */

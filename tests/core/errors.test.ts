@@ -7,6 +7,7 @@ import {
   MigrationError,
   NotFoundError,
   PluginLoadError,
+  RateLimitError,
   ValidationError,
   isAppError,
   toErrorEnvelope,
@@ -118,6 +119,23 @@ describe("NotFoundError", () => {
 
   it("has a non-empty default public message", () => {
     const error = new NotFoundError("no route matches GET /widgets/999");
+    expect(error.publicMessage.length).toBeGreaterThan(0);
+  });
+});
+
+describe("RateLimitError", () => {
+  it("carries a stable machine-readable code and status", () => {
+    const error = new RateLimitError(
+      "Rate limit exceeded for GET /api/v1/widgets: more than 5 requests, retry after 1 second.",
+    );
+    expect(error).toBeInstanceOf(AppError);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.code).toBe("RATE_LIMIT_EXCEEDED");
+    expect(error.statusCode).toBe(429);
+  });
+
+  it("has a non-empty default public message", () => {
+    const error = new RateLimitError("Rate limit exceeded for GET /api/v1/widgets");
     expect(error.publicMessage.length).toBeGreaterThan(0);
   });
 });

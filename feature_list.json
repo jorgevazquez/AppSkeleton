@@ -852,7 +852,7 @@
       "Write a test that exceeds the limit and asserts a 429 response"
     ],
     "depends_on": [58],
-    "passes": false
+    "passes": true
   },
   {
     "id": 67,
