@@ -347,6 +347,12 @@ function walk(
           state.mode = "attrValueUnquoted";
         }
         break;
+      case "raw":
+        // Deliberately not recorded in `contexts`: a {{{raw ...}}} tag (feature #50) is never
+        // escaped regardless of where it lands, so there is no escaper context to compute or
+        // look up for it — see template.ts's "raw" compiler case, which ignores `contexts`
+        // entirely for this node kind.
+        break;
       case "if":
         walkIf(node, state, contexts);
         break;

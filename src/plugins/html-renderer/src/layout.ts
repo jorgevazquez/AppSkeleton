@@ -55,8 +55,10 @@ import {
   compileResolvedNodes,
   compileTemplate,
   parseTemplate,
+  requireRawAudit,
   walkTemplateNodes,
   type CompiledTemplate,
+  type CompileOptions,
   type TemplateNode,
 } from "./template.js";
 
@@ -133,10 +135,16 @@ function applyBlockOverrides(
  * algorithm. Returns a {@link ValidationError} (never throws) for a
  * malformed template, an unresolvable layout name, or a circular/too-deep
  * `{{extends}}` chain.
+ *
+ * `options.audit` (feature #50) is required if the *resolved* tree — base
+ * layout structure with the winning block overrides spliced in — ends up
+ * containing a `{{{raw ...}}}` tag anywhere, even one contributed by a
+ * single level of the chain; see {@link requireRawAudit}.
  */
 export function compileWithLayout(
   source: string,
   layouts: LayoutSource,
+  options?: CompileOptions,
 ): Result<CompiledTemplate, ValidationError> {
   const rootResult = parseTemplate(source);
   if (!rootResult.ok) {
@@ -149,7 +157,7 @@ export function compileWithLayout(
     // Nothing to resolve: `source` doesn't extend anything, so it's a normal template — or a
     // base layout, rendered directly with its blocks' own default content. Delegate to
     // compileTemplate so this path gets exactly its validation/behavior, not a reimplementation.
-    return compileTemplate(source);
+    return compileTemplate(source, options);
   }
 
   const overrides = new Map<string, readonly TemplateNode[]>();
@@ -215,5 +223,9 @@ export function compileWithLayout(
   }
 
   const resolved = applyBlockOverrides(baseNodes, overrides);
-  return ok(compileResolvedNodes(resolved));
+  const rawAuditResult = requireRawAudit(resolved, options?.audit);
+  if (!rawAuditResult.ok) {
+    return rawAuditResult;
+  }
+  return ok(compileResolvedNodes(resolved, options?.audit));
 }
