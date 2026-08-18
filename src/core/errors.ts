@@ -144,6 +144,24 @@ export class CapabilityDeniedError extends AppError {
 }
 
 /**
+ * No resource matched the request. Used by api-gateway's uniform 4xx error
+ * envelope (feature #60) for both an unmatched route (no handler registered
+ * for the requested method/path) and, optionally, a plugin handler's own
+ * "the thing you asked for doesn't exist" case (e.g. wiki's future page
+ * lookup) — either way the client sees the same `{code, message, details}`
+ * shape every other AppError produces, never Fastify's own default
+ * `{statusCode, error, message}` 404 body.
+ */
+export class NotFoundError extends AppError {
+  readonly code = "NOT_FOUND";
+  readonly statusCode = 404;
+
+  protected override defaultPublicMessage(): string {
+    return "The requested resource was not found.";
+  }
+}
+
+/**
  * A query or transaction run through the database-mysql plugin's db:query /
  * db:transaction capability failed (a driver-level error such as a
  * constraint violation, an unreachable server, or a malformed query) —
