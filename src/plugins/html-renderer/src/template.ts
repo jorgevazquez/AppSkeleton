@@ -34,9 +34,24 @@
  * See html-context.ts's module doc comment for exactly what is and isn't
  * modeled, and escape.ts's for what each escaper defends against.
  *
+ * ## Layouts (feature #48)
+ *
+ * `{{#block "name"}} default content {{/block}}` marks a named,
+ * fill-in-able region; `{{extends "layoutName"}}` marks a template as one
+ * that renders through another named template rather than standalone. Both
+ * tags are part of this file's grammar/AST/compiler (so a base layout with
+ * only default block content is a perfectly normal template, compilable
+ * with plain {@link compileTemplate}) but `{{extends}}` composition itself
+ * — resolving a named layout, walking a chain of nested layouts, and
+ * splicing a child's block overrides into the base layout's structure — is
+ * layout.ts's job; see that module for the actual layout-chain algorithm
+ * and {@link compileWithLayout}. `compileTemplate` here refuses to compile
+ * a template containing an `{{extends}}` tag directly (see below) — it
+ * must go through `compileWithLayout` instead.
+ *
  * ## Deliberately out of scope here
  *
- * - Layouts and partials/components — features #48 and #49.
+ * - Partials/components — feature #49.
  * - An explicit raw/unescaped-output helper — feature #50.
  * - Compiled-template caching across calls — feature #53.
  *
@@ -56,12 +71,21 @@
  *   and, if not found there, falls back up through enclosing scopes —
  *   mirroring the Mustache "context stack" so a loop body can still
  *   reference variables from outside the loop.
+ * - `{{#block name}} ... {{/block}}` — a named, always-rendered region
+ *   (transparent when compiled standalone: its body just renders in
+ *   place) that layout composition may replace wholesale with a more
+ *   specific override. `name` is a single identifier (letters/digits/
+ *   underscore/hyphen, not starting with a digit).
+ * - `{{extends name}}` — marks this template as extending the named
+ *   layout. At most one per template (enforced by `parseTemplate`); see
+ *   layout.ts for how it's resolved. A template containing this tag
+ *   cannot be compiled with `compileTemplate` directly.
  *
  * Unknown/malformed tags (unclosed blocks, a stray `{{else}}`/`{{/if}}`/
- * `{{/each}}`, an empty `{{}}`, an invalid path) are reported as a
- * {@link ValidationError} from `parseTemplate`/`compileTemplate` — never
- * thrown — per the kernel's `Result`-based error convention (see
- * core/types.ts).
+ * `{{/each}}`/`{{/block}}`, an empty `{{}}`, an invalid path, more than
+ * one `{{extends}}`) are reported as a {@link ValidationError} from
+ * `parseTemplate`/`compileTemplate` — never thrown — per the kernel's
+ * `Result`-based error convention (see core/types.ts).
  */
 import { ValidationError } from "../../../core/errors.js";
 import { err, ok, type Result } from "../../../core/types.js";
@@ -98,7 +122,20 @@ export interface EachNode {
   readonly body: readonly TemplateNode[];
 }
 
-export type TemplateNode = TextNode | VariableNode | IfNode | EachNode;
+/** A named, fill-in-able region (feature #48 — layouts). See the module doc's "Layouts" section. */
+export interface BlockNode {
+  readonly kind: "block";
+  readonly name: string;
+  readonly body: readonly TemplateNode[];
+}
+
+/** Marks a template as extending a named layout (feature #48). Resolved by layout.ts. */
+export interface ExtendsNode {
+  readonly kind: "extends";
+  readonly name: string;
+}
+
+export type TemplateNode = TextNode | VariableNode | IfNode | EachNode | BlockNode | ExtendsNode;
 
 // ---------------------------------------------------------------------------
 // Tokenizer
@@ -129,12 +166,35 @@ interface IfCloseToken {
 interface EachCloseToken {
   readonly type: "each-close";
 }
+interface BlockOpenToken {
+  readonly type: "block-open";
+  readonly name: string;
+}
+interface BlockCloseToken {
+  readonly type: "block-close";
+}
+interface ExtendsToken {
+  readonly type: "extends";
+  readonly name: string;
+}
 
 type Token =
-  TextToken | VarToken | IfOpenToken | EachOpenToken | ElseToken | IfCloseToken | EachCloseToken;
+  | TextToken
+  | VarToken
+  | IfOpenToken
+  | EachOpenToken
+  | ElseToken
+  | IfCloseToken
+  | EachCloseToken
+  | BlockOpenToken
+  | BlockCloseToken
+  | ExtendsToken;
 
 /** `path.segment` shape: letters/digits/underscore, not starting with a digit. */
 const PATH_SEGMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** `{{#block name}}`/`{{extends name}}` name shape: like a path segment, but hyphens are also allowed. */
+const NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 
 /** The reserved single-segment loop variables, valid only as a whole path. */
 const RESERVED_PATH_NAMES = new Set(["this", "@index", "@key"]);
@@ -209,6 +269,50 @@ function tokenize(source: string): Result<Token[], ValidationError> {
       tokens.push({ type: "each-open", path: pathResult.value });
       continue;
     }
+    if (content === "/block") {
+      tokens.push({ type: "block-close" });
+      continue;
+    }
+    if (content === "#block" || content.startsWith("#block ") || content.startsWith("#block\t")) {
+      const name = content.slice(6).trim();
+      if (name.length === 0) {
+        return err(new ValidationError("Invalid {{#block}} tag: expected a block name, got none."));
+      }
+      if (!NAME_PATTERN.test(name)) {
+        return err(
+          new ValidationError(`Invalid {{#block}} name "${name}": not a valid identifier.`, {
+            details: { name },
+          }),
+        );
+      }
+      tokens.push({ type: "block-open", name });
+      continue;
+    }
+    if (
+      content === "extends" ||
+      content.startsWith("extends ") ||
+      content.startsWith("extends\t")
+    ) {
+      const name = content.slice(7).trim();
+      if (name.length === 0) {
+        return err(
+          new ValidationError("Invalid {{extends}} tag: expected a layout name, got none."),
+        );
+      }
+      if (!NAME_PATTERN.test(name)) {
+        return err(
+          new ValidationError(
+            `Invalid {{extends}} layout name "${name}": not a valid identifier.`,
+            {
+              details: { name },
+            },
+          ),
+        );
+      }
+      tokens.push({ type: "extends", name });
+      continue;
+    }
+
     if (content.startsWith("#") || content.startsWith("/")) {
       return err(
         new ValidationError(`Unknown template tag "{{${content}}}".`, { details: { content } }),
@@ -232,7 +336,7 @@ function tokenize(source: string): Result<Token[], ValidationError> {
 // Parser (tokens -> AST)
 // ---------------------------------------------------------------------------
 
-type BlockCloser = "else" | "if-close" | "each-close";
+type BlockCloser = "else" | "if-close" | "each-close" | "block-close";
 
 /**
  * Recursive-descent parse of a token stream into a `TemplateNode[]` tree,
@@ -255,7 +359,7 @@ function parseTokens(tokens: readonly Token[]): Result<TemplateNode[], Validatio
    */
   function parseUntil(
     stopAt: ReadonlySet<BlockCloser> | null,
-    openedBy?: "if" | "each",
+    openedBy?: "if" | "each" | "block",
   ): Result<TemplateNode[], ValidationError> {
     const nodes: TemplateNode[] = [];
 
@@ -321,18 +425,41 @@ function parseTokens(tokens: readonly Token[]): Result<TemplateNode[], Validatio
           nodes.push({ kind: "each", path: token.path, body: bodyResult.value });
           break;
         }
+        case "block-open": {
+          pos++;
+          const bodyResult = parseUntil(new Set(["block-close"]), "block");
+          if (!bodyResult.ok) {
+            return bodyResult;
+          }
+          if (peekType() !== "block-close") {
+            return err(
+              new ValidationError("Unclosed {{#block}} block: missing a matching {{/block}}."),
+            );
+          }
+          pos++;
+          nodes.push({ kind: "block", name: token.name, body: bodyResult.value });
+          break;
+        }
+        case "extends":
+          nodes.push({ kind: "extends", name: token.name });
+          pos++;
+          break;
         case "else":
           return err(new ValidationError("Unexpected {{else}} with no matching {{#if}}."));
         case "if-close":
           return err(new ValidationError("Unexpected {{/if}} with no matching {{#if}}."));
         case "each-close":
           return err(new ValidationError("Unexpected {{/each}} with no matching {{#each}}."));
+        case "block-close":
+          return err(new ValidationError("Unexpected {{/block}} with no matching {{#block}}."));
       }
     }
 
     if (stopAt !== null) {
-      const tag = openedBy === "each" ? "{{#each}}" : "{{#if}}";
-      const closer = openedBy === "each" ? "{{/each}}" : "{{/if}}";
+      const tag =
+        openedBy === "each" ? "{{#each}}" : openedBy === "block" ? "{{#block}}" : "{{#if}}";
+      const closer =
+        openedBy === "each" ? "{{/each}}" : openedBy === "block" ? "{{/block}}" : "{{/if}}";
       return err(
         new ValidationError(
           `Unclosed ${tag} block: reached end of template without a matching ${closer}.`,
@@ -346,7 +473,7 @@ function parseTokens(tokens: readonly Token[]): Result<TemplateNode[], Validatio
 }
 
 function isBlockCloser(type: Token["type"]): type is BlockCloser {
-  return type === "else" || type === "if-close" || type === "each-close";
+  return type === "else" || type === "if-close" || type === "each-close" || type === "block-close";
 }
 
 /** Parse template source into an AST. Exposed for testing/inspection; {@link compileTemplate} is the normal entry point. */
@@ -355,7 +482,53 @@ export function parseTemplate(source: string): Result<TemplateNode[], Validation
   if (!tokensResult.ok) {
     return tokensResult;
   }
-  return parseTokens(tokensResult.value);
+  const parsedResult = parseTokens(tokensResult.value);
+  if (!parsedResult.ok) {
+    return parsedResult;
+  }
+  if (countNodesOfKind(parsedResult.value, "extends") > 1) {
+    return err(new ValidationError("A template may contain at most one {{extends}} tag."));
+  }
+  return parsedResult;
+}
+
+/**
+ * Recursively walk `nodes` in source order (including into `if`/`each`/
+ * `block` bodies), invoking `visit` once per node. Exposed for layout.ts
+ * (block-override collection, `{{extends}}` lookup) and used internally
+ * for `{{extends}}`-count validation.
+ */
+export function walkTemplateNodes(
+  nodes: readonly TemplateNode[],
+  visit: (node: TemplateNode) => void,
+): void {
+  for (const node of nodes) {
+    visit(node);
+    switch (node.kind) {
+      case "if":
+        walkTemplateNodes(node.consequent, visit);
+        walkTemplateNodes(node.alternate, visit);
+        break;
+      case "each":
+        walkTemplateNodes(node.body, visit);
+        break;
+      case "block":
+        walkTemplateNodes(node.body, visit);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+function countNodesOfKind(nodes: readonly TemplateNode[], kind: TemplateNode["kind"]): number {
+  let count = 0;
+  walkTemplateNodes(nodes, (node) => {
+    if (node.kind === kind) {
+      count++;
+    }
+  });
+  return count;
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +660,24 @@ function compileNode(node: TemplateNode, contexts: EscapeContexts): CompiledNode
         // Anything else (undefined, null, a primitive) iterates zero times — no error.
       };
     }
+    case "block": {
+      // Transparent when compiled standalone: a block's body just renders in place. Layout
+      // composition (layout.ts) replaces `node.body` with the resolved override *before* this
+      // function ever runs — see compileResolvedNodes — so by the time a "block" node reaches
+      // here, `body` already reflects whichever level of the layout chain won.
+      const body = compileNodes(node.body, contexts);
+      return (scope, out) => {
+        runCompiled(body, scope, out);
+      };
+    }
+    case "extends": {
+      // Never reached in practice: compileTemplate() rejects any template containing an
+      // {{extends}} tag before calling compileNodes (see below), and layout.ts's composition
+      // strips {{extends}} nodes out of the tree it hands to compileResolvedNodes. Render as
+      // nothing rather than throwing, so this stays a defensive no-op rather than a new failure
+      // mode if that invariant is ever violated.
+      return (_scope, _out) => {};
+    }
   }
 }
 
@@ -504,24 +695,51 @@ export interface CompiledTemplate {
 }
 
 /**
- * Parse and compile `source` once into a {@link CompiledTemplate}. Call
- * `.render(context)` as many times as needed afterwards — each call only
- * walks the already-built closure tree, it never re-parses `source` or
- * re-walks the AST's structure.
+ * Compile an already-fully-resolved AST (no `{{extends}}` nodes remaining
+ * — layout composition has already spliced every `{{#block}}`'s body with
+ * its winning override, if any) into a {@link CompiledTemplate}. Shared by
+ * {@link compileTemplate} (source has no `{{extends}}` to begin with) and
+ * layout.ts's `compileWithLayout` (source's `{{extends}}` chain has just
+ * been resolved into a single tree). Exported so layout.ts never has to
+ * reimplement escape-context annotation or closure compilation.
  */
-export function compileTemplate(source: string): Result<CompiledTemplate, ValidationError> {
-  const astResult = parseTemplate(source);
-  if (!astResult.ok) {
-    return astResult;
-  }
-  const contexts = annotateEscapeContexts(astResult.value);
-  const compiled = compileNodes(astResult.value, contexts);
-  return ok({
+export function compileResolvedNodes(nodes: readonly TemplateNode[]): CompiledTemplate {
+  const contexts = annotateEscapeContexts(nodes);
+  const compiled = compileNodes(nodes, contexts);
+  return {
     render(context: TemplateContext = {}): string {
       const out: string[] = [];
       const rootScope: Scope = { data: context };
       runCompiled(compiled, rootScope, out);
       return out.join("");
     },
-  });
+  };
+}
+
+/**
+ * Parse and compile `source` once into a {@link CompiledTemplate}. Call
+ * `.render(context)` as many times as needed afterwards — each call only
+ * walks the already-built closure tree, it never re-parses `source` or
+ * re-walks the AST's structure.
+ *
+ * Rejects (with a {@link ValidationError}) any template containing an
+ * `{{extends}}` tag — that composition is layout.ts's `compileWithLayout`
+ * job, not this function's. A template using only `{{#block}}` (with no
+ * `{{extends}}`) — i.e. a standalone or base layout — compiles here just
+ * fine; its blocks simply render their own default content.
+ */
+export function compileTemplate(source: string): Result<CompiledTemplate, ValidationError> {
+  const astResult = parseTemplate(source);
+  if (!astResult.ok) {
+    return astResult;
+  }
+  if (countNodesOfKind(astResult.value, "extends") > 0) {
+    return err(
+      new ValidationError(
+        "Template contains an {{extends}} tag; use compileWithLayout (layout.ts) to render a " +
+          "template that extends a layout, not compileTemplate.",
+      ),
+    );
+  }
+  return ok(compileResolvedNodes(astResult.value));
 }
