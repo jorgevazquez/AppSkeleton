@@ -33,6 +33,31 @@
  * outright) throws a {@link MigrationError} and nothing runs, rather than
  * silently building on top of, or rolling back, a file that no longer
  * matches what actually ran.
+ *
+ * ## Per-plugin table namespace enforcement (feature #22)
+ *
+ * spec.md: "a per-plugin schema/table namespace convention so plugins
+ * cannot collide". The convention is `<plugin_id>_<table>` — a plugin's
+ * migrations may only create tables prefixed with that plugin's own id
+ * (hyphens become underscores, since MySQL identifiers are conventionally
+ * snake_case: plugin id `database-mysql` → prefix `database_mysql_`, e.g.
+ * `database_mysql_widgets`; see {@link pluginTablePrefix}). `runMigrationsUp`/
+ * `runMigrationsDown` both take a required `pluginId` and wrap the
+ * `Kysely`/`Transaction` instance handed to a migration's `up`/`down` (see
+ * {@link withTableNamespaceGuard}) so that `db.schema.createTable(name)` is
+ * checked (via {@link assertTableNamespace}) *before* the real call ever
+ * runs — a migration that creates a table outside its own plugin's
+ * namespace throws a {@link MigrationError} and creates nothing. Because
+ * every plugin's prefix is unique (plugin ids are unique — enforced at
+ * manifest-validation time), rejecting anything that isn't under a
+ * migration's own prefix necessarily also rejects any table name that
+ * happens to fall inside a *different* plugin's namespace — there's no
+ * need for the runner to separately enumerate every other plugin's id to
+ * catch that case. The `schema_migrations` tracking table itself is exempt
+ * (it's kernel bookkeeping, not a plugin-owned domain table — see this
+ * module's `MIGRATIONS_TABLE` and feature #19's notes) since the guard
+ * only wraps the object passed *into* a migration module, never the
+ * runner's own internal `ensureMigrationsTable()`/tracking-row calls.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -168,6 +193,111 @@ export function verifyAppliedChecksums(
   }
 }
 
+/**
+ * Convert a plugin id (kebab-case, e.g. `"database-mysql"`) into its table
+ * naming prefix (`"database_mysql_"`) — hyphens become underscores (MySQL
+ * identifiers are conventionally snake_case) and a trailing `_` is added so
+ * callers can prepend it straight onto a table's own name. See this
+ * module's "Per-plugin table namespace enforcement" doc section above.
+ */
+export function pluginTablePrefix(pluginId: string): string {
+  return `${pluginId.replace(/-/g, "_")}_`;
+}
+
+/**
+ * Enforce the `<plugin_id>_<table>` naming convention (feature #22, step 1)
+ * for a single table name a migration is about to create. Throws
+ * {@link MigrationError} if `tableName` isn't prefixed with `pluginId`'s own
+ * {@link pluginTablePrefix} — which also covers step 2 ("reject a migration
+ * that creates a table violating another plugin's namespace"): since plugin
+ * ids are unique, a table name outside a migration's own prefix can only
+ * ever be either malformed or claim some other plugin's namespace, and
+ * both are rejected identically here.
+ */
+export function assertTableNamespace(pluginId: string, tableName: string): void {
+  const prefix = pluginTablePrefix(pluginId);
+  if (tableName.startsWith(prefix) && tableName.length > prefix.length) {
+    return;
+  }
+  throw new MigrationError(
+    `Migration for plugin "${pluginId}" attempted to create table "${tableName}", which is outside ` +
+      `its own namespace. Every table a plugin's migrations create must be named "${prefix}<table>" ` +
+      `(e.g. "${prefix}widgets") so it can never collide with another plugin's tables.`,
+    {
+      details: {
+        pluginId,
+        tableName,
+        requiredPrefix: prefix,
+        reason: "table_namespace_violation",
+      },
+    },
+  );
+}
+
+/**
+ * Bind every function-valued property `target` exposes to `target` itself
+ * before handing it back, and force `receiver = target` when reading a
+ * getter (e.g. Kysely's `schema` getter, which constructs a fresh
+ * `SchemaModule` per access). Kysely's own classes hold their state in true
+ * private (`#`) fields, which throw if a method (or a getter) ever runs
+ * with `this` bound to anything other than the exact instance that
+ * constructed them — a plain `Proxy` that returns methods unbound would
+ * break the instant a caller does `guarded.someMethod()`, since a member
+ * call binds `this` to the proxy, not the real target. Binding up front
+ * sidesteps that entirely: whatever the caller does with the returned
+ * function, `this` is always the real instance.
+ */
+function bindToTarget<T extends object>(target: T): T {
+  return new Proxy(target, {
+    get(t, prop) {
+      const value = Reflect.get(t, prop, t);
+      return typeof value === "function" ? value.bind(t) : value;
+    },
+  });
+}
+
+/**
+ * Wrap a `Kysely`/`Transaction` instance so that any `db.schema.createTable(name)`
+ * call is checked with {@link assertTableNamespace} *before* the real
+ * `createTable` runs — a migration that creates a table outside its own
+ * plugin's namespace throws immediately and nothing is ever sent to MySQL.
+ * Every other property/method (including every other `schema.*` method,
+ * e.g. `dropTable`/`alterTable`) passes through untouched (via
+ * {@link bindToTarget}) — this guard is deliberately narrow, matching this
+ * feature's literal scope ("reject a migration that *creates* a table...").
+ * Exported (rather than kept module-private like {@link bindToTarget}) so
+ * this wiring — not just {@link assertTableNamespace}'s pure logic — has
+ * direct unit coverage against a lightweight fake `Kysely`-shaped object,
+ * without needing a real MySQL connection.
+ */
+export function withTableNamespaceGuard<T extends Kysely<Database>>(trx: T, pluginId: string): T {
+  return new Proxy(trx, {
+    get(target, prop) {
+      if (prop === "schema") {
+        // Force receiver = target so Kysely's `get schema()` getter builds
+        // its SchemaModule correctly bound to the real transaction, not
+        // this proxy — see bindToTarget's doc comment.
+        const realSchema = Reflect.get(target, "schema", target) as object;
+        const guardedSchema = bindToTarget(realSchema);
+        return new Proxy(guardedSchema, {
+          get(schemaTarget, schemaProp) {
+            const value = Reflect.get(schemaTarget, schemaProp) as unknown;
+            if (schemaProp === "createTable" && typeof value === "function") {
+              return (tableName: string, ...rest: unknown[]) => {
+                assertTableNamespace(pluginId, tableName);
+                return (value as (...args: unknown[]) => unknown)(tableName, ...rest);
+              };
+            }
+            return value;
+          },
+        });
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as T;
+}
+
 /** Migration files not yet recorded as applied, in run order. */
 export function planPendingMigrations(
   files: readonly MigrationFile[],
@@ -182,6 +312,16 @@ export interface MigrateUpResult {
   applied: string[];
 }
 
+export interface MigrateUpOptions {
+  /**
+   * The id of the plugin these migration files belong to (e.g.
+   * `"database-mysql"`). Required — every table a migration creates is
+   * checked against this plugin's own namespace prefix (see
+   * {@link assertTableNamespace}) before it's allowed to run.
+   */
+  pluginId: string;
+}
+
 /**
  * Apply every pending migration, in order. Ensures {@link MIGRATIONS_TABLE}
  * exists, then verifies every already-applied migration's checksum
@@ -189,10 +329,16 @@ export interface MigrateUpResult {
  * Each migration runs in its own transaction: its `up(db)` plus the
  * corresponding `INSERT` into {@link MIGRATIONS_TABLE} commit together, so a
  * later migration's failure can never leave an earlier one half-recorded.
+ * The `db` handed to the migration's own `up()` is wrapped with
+ * {@link withTableNamespaceGuard} using `options.pluginId` — a migration
+ * that tries to create a table outside its own plugin's namespace throws
+ * a {@link MigrationError} (feature #22) and its transaction rolls back,
+ * so nothing it did partially commits.
  */
 export async function runMigrationsUp(
   db: Kysely<Database>,
   files: readonly MigrationFile[],
+  options: MigrateUpOptions,
 ): Promise<MigrateUpResult> {
   await ensureMigrationsTable(db);
   const applied = await getAppliedMigrations(db);
@@ -203,7 +349,7 @@ export async function runMigrationsUp(
   for (const file of pending) {
     const migration = await importMigrationModule(file);
     await db.transaction().execute(async (trx) => {
-      await migration.up(trx);
+      await migration.up(withTableNamespaceGuard(trx, options.pluginId));
       await trx
         .insertInto(MIGRATIONS_TABLE)
         .values({ name: file.name, checksum: file.checksum })
@@ -217,6 +363,13 @@ export async function runMigrationsUp(
 export interface MigrateDownOptions {
   /** How many already-applied migrations to roll back, most-recently-applied first. Defaults to 1. */
   steps?: number;
+  /**
+   * The id of the plugin these migration files belong to. Required — see
+   * {@link MigrateUpOptions.pluginId}; the same namespace guard applies to
+   * `down()` migrations for consistency, even though a downgrade creating a
+   * table is unusual.
+   */
+  pluginId: string;
 }
 
 export interface MigrateDownResult {
@@ -236,7 +389,7 @@ export interface MigrateDownResult {
 export async function runMigrationsDown(
   db: Kysely<Database>,
   files: readonly MigrationFile[],
-  options: MigrateDownOptions = {},
+  options: MigrateDownOptions,
 ): Promise<MigrateDownResult> {
   const steps = options.steps ?? 1;
   await ensureMigrationsTable(db);
@@ -263,7 +416,7 @@ export async function runMigrationsDown(
     }
     const migration = await importMigrationModule(file);
     await db.transaction().execute(async (trx) => {
-      await migration.down(trx);
+      await migration.down(withTableNamespaceGuard(trx, options.pluginId));
       await trx.deleteFrom(MIGRATIONS_TABLE).where("name", "=", row.name).execute();
     });
     rolledBack.push(row.name);

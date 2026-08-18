@@ -9,12 +9,17 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { Kysely } from "kysely";
 import { MigrationError } from "../../../src/core/errors.js";
+import type { Database } from "../../../src/plugins/database-mysql/src/db.js";
 import {
+  assertTableNamespace,
   computeChecksum,
   listMigrationFiles,
   planPendingMigrations,
+  pluginTablePrefix,
   verifyAppliedChecksums,
+  withTableNamespaceGuard,
   type AppliedMigrationRow,
   type MigrationFile,
 } from "../../../src/plugins/database-mysql/src/migrator.js";
@@ -227,5 +232,137 @@ describe("planPendingMigrations", () => {
       "0001_a.ts",
       "0003_c.ts",
     ]);
+  });
+});
+
+/**
+ * Feature #22 ("Per-plugin schema/table namespace enforcement"). Covers
+ * step 1 (the `<plugin_id>_<table>` convention, via `pluginTablePrefix`/
+ * `assertTableNamespace`) and step 3 (a unit test asserting a misnamed
+ * table migration is rejected with a clear error) — no MySQL required,
+ * mirroring this file's other pure-logic suites above.
+ */
+describe("pluginTablePrefix", () => {
+  it("converts hyphens in the plugin id to underscores and appends a trailing underscore", () => {
+    expect(pluginTablePrefix("database-mysql")).toBe("database_mysql_");
+  });
+
+  it("appends a trailing underscore to a plugin id with no hyphens", () => {
+    expect(pluginTablePrefix("rbac")).toBe("rbac_");
+  });
+});
+
+describe("assertTableNamespace", () => {
+  it("allows a table name correctly prefixed with its own plugin id", () => {
+    expect(() => assertTableNamespace("database-mysql", "database_mysql_widgets")).not.toThrow();
+    expect(() => assertTableNamespace("rbac", "rbac_roles")).not.toThrow();
+  });
+
+  it("rejects a table name with no plugin prefix at all", () => {
+    expect(() => assertTableNamespace("database-mysql", "widgets")).toThrow(MigrationError);
+  });
+
+  it("rejects a table name that is exactly the prefix with nothing after it", () => {
+    expect(() => assertTableNamespace("database-mysql", "database_mysql_")).toThrow(MigrationError);
+  });
+
+  it("rejects a migration that creates a table violating another plugin's namespace, naming both plugins and the required prefix", () => {
+    try {
+      assertTableNamespace("rbac", "database_mysql_widgets");
+      expect.unreachable("expected assertTableNamespace to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MigrationError);
+      const migrationError = error as MigrationError;
+      expect(migrationError.message).toContain("rbac");
+      expect(migrationError.message).toContain("database_mysql_widgets");
+      expect(migrationError.message).toContain("rbac_");
+      expect(migrationError.details).toMatchObject({
+        pluginId: "rbac",
+        tableName: "database_mysql_widgets",
+        requiredPrefix: "rbac_",
+        reason: "table_namespace_violation",
+      });
+      // The generic publicMessage never leaks the offending table name.
+      expect(migrationError.publicMessage).not.toContain("database_mysql_widgets");
+    }
+  });
+});
+
+describe("withTableNamespaceGuard", () => {
+  /**
+   * A minimal fake standing in for a `Kysely`/`Transaction<Database>`
+   * instance — just enough surface (`schema.createTable(name)`) for
+   * `withTableNamespaceGuard` to wrap, without a real MySQL connection or
+   * Kysely's own private-field-guarded classes. `createTable` is a plain
+   * spy so tests can assert whether the real call ever happened.
+   */
+  function fakeTrx(createTable: (tableName: string) => unknown) {
+    const schema = { createTable };
+    return {
+      get schema() {
+        return schema;
+      },
+    };
+  }
+
+  it("lets a correctly-namespaced createTable call through to the real schema builder", () => {
+    const calls: string[] = [];
+    const trx = fakeTrx((tableName) => {
+      calls.push(tableName);
+      return "builder";
+    });
+
+    const guarded = withTableNamespaceGuard(trx as unknown as Kysely<Database>, "database-mysql");
+    const result = (
+      guarded as unknown as { schema: { createTable(name: string): unknown } }
+    ).schema.createTable("database_mysql_widgets");
+
+    expect(calls).toEqual(["database_mysql_widgets"]);
+    expect(result).toBe("builder");
+  });
+
+  it("rejects a misnamed table before the real createTable is ever called", () => {
+    const calls: string[] = [];
+    const trx = fakeTrx((tableName) => {
+      calls.push(tableName);
+      return "builder";
+    });
+
+    const guarded = withTableNamespaceGuard(trx as unknown as Kysely<Database>, "database-mysql");
+    expect(() =>
+      (guarded as unknown as { schema: { createTable(name: string): unknown } }).schema.createTable(
+        "rbac_roles",
+      ),
+    ).toThrow(MigrationError);
+
+    // The real createTable never ran — the guard rejects before delegating.
+    expect(calls).toEqual([]);
+  });
+
+  it("throws a clear, specific error naming the plugin, the table, and the required prefix", () => {
+    const trx = fakeTrx(() => "builder");
+    const guarded = withTableNamespaceGuard(
+      trx as unknown as Kysely<Database>,
+      "database-mysql",
+    ) as unknown as {
+      schema: { createTable(name: string): unknown };
+    };
+
+    try {
+      guarded.schema.createTable("wiki_pages");
+      expect.unreachable("expected createTable to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MigrationError);
+      const migrationError = error as MigrationError;
+      expect(migrationError.message).toContain("database-mysql");
+      expect(migrationError.message).toContain("wiki_pages");
+      expect(migrationError.message).toContain("database_mysql_");
+      expect(migrationError.details).toMatchObject({
+        pluginId: "database-mysql",
+        tableName: "wiki_pages",
+        requiredPrefix: "database_mysql_",
+        reason: "table_namespace_violation",
+      });
+    }
   });
 });

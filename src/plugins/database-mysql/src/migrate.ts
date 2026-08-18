@@ -31,6 +31,9 @@ import { createDbPoolFromEnv } from "./pool.js";
 
 const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "migrations");
 
+/** This plugin's own id — matches `plugin.json`'s `id` field. Used to namespace-check every table its migrations create (feature #22). */
+const PLUGIN_ID = "database-mysql";
+
 type Direction = "up" | "down";
 
 function parseDirection(argv: readonly string[]): Direction {
@@ -58,7 +61,7 @@ async function main(): Promise<void> {
   try {
     const files = listMigrationFiles(MIGRATIONS_DIR);
     if (direction === "up") {
-      const { applied } = await runMigrationsUp(db, files);
+      const { applied } = await runMigrationsUp(db, files, { pluginId: PLUGIN_ID });
       if (applied.length === 0) {
         console.log("Nothing to migrate — already up to date.");
       } else {
@@ -68,7 +71,7 @@ async function main(): Promise<void> {
         }
       }
     } else {
-      const { rolledBack } = await runMigrationsDown(db, files);
+      const { rolledBack } = await runMigrationsDown(db, files, { pluginId: PLUGIN_ID });
       if (rolledBack.length === 0) {
         console.log("Nothing to roll back — no migrations are applied.");
       } else {
