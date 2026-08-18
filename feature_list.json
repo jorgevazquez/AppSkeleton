@@ -439,7 +439,7 @@
       "Write an integration test: create a role, assign a permission, assign to a user, restart, and confirm state persisted"
     ],
     "depends_on": [19, 20, 32],
-    "passes": false
+    "passes": true
   },
   {
     "id": 35,
