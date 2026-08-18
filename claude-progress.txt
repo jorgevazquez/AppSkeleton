@@ -597,3 +597,26 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Chose an onInstall-throws failure mode for the broken plugin (auth) rather than reusing the 'missing entry point' pattern already covered elsewhere, so this suite exercises a second, distinct isolation path through loader.ts's try/catch-per-plugin logic.
 - Followed the existing writePluginDir/trackedTempRoot helper pattern from tests/server/index.test.ts (mkdtempSync under os.tmpdir(), cleaned up in afterEach) rather than introducing a new fixture-writing utility.
 - Feature depends_on [8, 10] (loader lifecycle hooks, error isolation) — both were already implemented and passing; no source changes were needed, only the new test file.
+
+---
+
+## 2026-08-17 17:51 — Feature #15: Written plugin conventions spec: naming rules, capability grammar (resource:action), forbidden cross-plugin imports
+
+### What was done:
+- Added docs/plugin-conventions.md: normative spec covering directory layout (both the generic src/plugins/<id>/{plugin.json,index.ts,src/,tests/} shape and this repo's actual parallel tests/ tree), naming rules for plugin id and entry_point, the full plugin.json manifest field table, the capability naming grammar (namespace:action, aka resource:action per spec.md's rbac section), and forbidden cross-plugin import rules (what a plugin under src/plugins/<id>/** may/must-not import).
+- Exported PLUGIN_ID_PATTERN, CAPABILITY_PATTERN, ENTRY_POINT_PATTERN (plus their _DESCRIPTION strings) from src/core/manifest.ts, which were previously module-private consts — these are now the single shared source of truth the doc quotes from and the new test imports directly, so validator and doc cannot silently diverge.
+- Wrote each of the three regexes into docs/plugin-conventions.md as dedicated fenced code blocks (```plugin-id-regex, ```entry-point-regex, ```capability-grammar-regex) containing only the bare regex source, specifically so a test can extract and diff them byte-for-byte against the exported patterns' .source.
+- Added tests/core/plugin-conventions.test.ts: extracts each fenced regex block from the doc and asserts it equals the corresponding exported manifest.ts pattern's .source (capability grammar, plugin id, entry point), plus a sanity round-trip test that the documented capability regex actually behaves like CAPABILITY_PATTERN against known valid/invalid capability strings, and content-presence checks for the import-rules and manifest-field sections.
+
+### Testing:
+- npx vitest run tests/core/plugin-conventions.test.ts: 6/6 passing.
+- npm run build (tsc --strict): clean.
+- npm run lint (eslint): clean.
+- npx prettier --write/--check on docs/plugin-conventions.md, tests/core/plugin-conventions.test.ts, src/core/manifest.ts: clean (re-ran the regex-extraction test after prettier reformatted the doc's table/emphasis syntax to confirm the fenced regex blocks — which prettier does not reflow — still matched byte-for-byte).
+- npm test (full suite): 32 files / 520 tests passing (514 pre-existing + 6 new), zero regressions.
+
+### Notes:
+- Chose fenced code blocks with distinct language tags (plugin-id-regex, entry-point-regex, capability-grammar-regex) over an inline backtick regex in prose, specifically so the drift-check test's extraction is unambiguous and doesn't accidentally match a regex-shaped substring elsewhere in the doc.
+- Feature #15's title says 'capability grammar (resource:action)' but manifest.ts's actual field/param names and comments say 'namespace:action' — these are the same grammar under two names used in different parts of this codebase (capabilities vs. spec.md's rbac permissions); the doc calls this out explicitly in section 4 rather than picking one term silently, so a future reader isn't confused when they see both used interchangeably in the source.
+- Did not add automated lint enforcement of the forbidden-cross-plugin-import rule (e.g. an eslint no-restricted-imports rule) — the feature's steps only ask this rule to be documented and cross-checked at the regex/grammar level, and spec.md explicitly assigns static-linting-of-conventions ('naming, capability declarations, no forbidden imports') to the plugin-builder plugin, a separate not-yet-built feature. Adding ad hoc enforcement here would risk conflicting with plugin-builder's eventual design.
+- Also exported PLUGIN_ID_PATTERN/ENTRY_POINT_PATTERN (not just CAPABILITY_PATTERN, which was the only one the feature's step 3 literally requires a test for) for the same drift-prevention reason, since the feature's step 1 also asks the doc to cover naming rules generally — a future agent extending the naming-rules section should reuse these exports rather than re-deriving another regex by hand.
