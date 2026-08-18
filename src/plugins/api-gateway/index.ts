@@ -25,15 +25,37 @@
  *
  * ## Scope of this feature
  *
- * This module only owns constructing the instance and a `/health` route —
- * proving the kernel can mount and listen on a plugin-owned Fastify
- * instance. The typed route-registration surface other plugins use to
- * register their own routes through `http:route` is feature #59's job (see
- * feature_list.json), not this one.
+ * This module owns constructing the instance and a `/health` route, proving
+ * the kernel can mount and listen on a plugin-owned Fastify instance
+ * (feature #58) — plus the typed `registerRoute()` surface other plugins
+ * use to register their own routes through `http:route` (feature #59, see
+ * `./src/route-capability.ts`, which does the actual schema-enforcement and
+ * `app.route()` wrapping; this module only wires it to the same `getApp`
+ * closure `HttpRouteCapability.getApp()` already uses).
  */
 import Fastify from "fastify";
 import { createLogger } from "../../core/logger.js";
 import type { PluginLifecycleContext } from "../../core/loader.js";
+import {
+  createRouteRegistrar,
+  type HttpRouteRegistrationCapability,
+} from "./src/route-capability.js";
+
+// Re-exported so a consuming plugin can type-only import everything it
+// needs for `capabilities.obtain<HttpRouteCapability>("http:route")` calls
+// (schema shape, handler signature, etc.) from this one module, the same
+// way it already imports `HttpRouteCapability`/`ApiGatewayApp` from here —
+// see the kernel bootstrap's own comment on why a type-only import here
+// creates no runtime coupling.
+export type {
+  HttpMethod,
+  HttpRouteRegistrationCapability,
+  JsonSchemaObject,
+  RegisterRouteOptions,
+  RouteHandler,
+  RouteRequestSchema,
+  RouteSchema,
+} from "./src/route-capability.js";
 
 /**
  * Construct the Fastify instance this plugin owns, with the given lifecycle
@@ -65,11 +87,12 @@ export type ApiGatewayApp = ReturnType<typeof buildApp>;
 
 /**
  * What api-gateway registers with the broker under the `http:route`
- * capability id. Deliberately minimal for this feature — just enough for the
- * kernel bootstrap to reach the live Fastify instance once it exists; see
- * this module's docs.
+ * capability id: reaching the live Fastify instance (feature #58's
+ * `getApp()`) plus the typed route-registration surface other plugins use
+ * to mount their own endpoints on it (feature #59's `registerRoute()`, see
+ * `./src/route-capability.ts`).
  */
-export interface HttpRouteCapability {
+export interface HttpRouteCapability extends HttpRouteRegistrationCapability {
   /**
    * The live Fastify instance constructed in `onEnable`. Throws if called
    * before `onEnable` has run (which should never happen for a caller
@@ -93,6 +116,14 @@ function getApp(): ApiGatewayApp {
 }
 
 /**
+ * `registerRoute()`'s implementation, built once at module scope — see
+ * `./src/route-capability.ts`'s docs on why it's safe to construct this
+ * ahead of `onEnable` (it only closes over `getApp`, never calls it until a
+ * caller actually invokes `registerRoute()`).
+ */
+const routeRegistrar = createRouteRegistrar(getApp);
+
+/**
  * Registered with the broker before this module's lifecycle hooks run — see
  * module docs. Typed as always-present (`Readonly<Record<string, unknown>>`,
  * not `PluginModule["provides"]`'s `| undefined`) since this module always
@@ -101,7 +132,10 @@ function getApp(): ApiGatewayApp {
  * provide nothing at all.
  */
 export const provides: Readonly<Record<string, unknown>> = {
-  "http:route": { getApp } satisfies HttpRouteCapability,
+  "http:route": {
+    getApp,
+    registerRoute: routeRegistrar.registerRoute,
+  } satisfies HttpRouteCapability,
 };
 
 /**
