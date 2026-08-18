@@ -108,7 +108,9 @@
  *
  * ## Deliberately out of scope here
  *
- * - Compiled-template caching across calls — feature #53.
+ * - Compiled-template caching across calls, keyed by file path with
+ *   dev-mode invalidation on change — feature #53, see `./template-cache.ts`
+ *   for the caching layer built on top of `compileTemplate` here.
  *
  * ## Grammar
  *
