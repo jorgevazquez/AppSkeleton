@@ -60,11 +60,40 @@
  * { reason: "pool_exhausted" }`, a public message naming the condition)
  * rather than mysql2's raw "Queue limit reached."/"No connections
  * available." string ever reaching a capability consumer.
+ *
+ * ## Health check (feature #24)
+ *
+ * {@link DbQueryCapability.healthCheck} runs a trivial `SELECT 1` straight
+ * through the shared `Kysely<Database>` instance (Kysely's `sql` tagged
+ * template, not `query()`/`fn` — a health probe is kernel-internal
+ * plumbing, not a capability-consumer query) and reports whether the
+ * database answered. It deliberately never throws: any failure — a
+ * connection refused, a timeout, an auth error — is caught and folded into
+ * `{ healthy: false, error }` rather than rejecting, so a caller (kernel
+ * introspection, see `core/introspect.ts`) can always render a result
+ * without its own try/catch. It also does not go through
+ * {@link retryWithBackoff} the way `query()`/`fn` does: a health check's
+ * entire purpose is to report the database's *current* reachability, so
+ * retrying-until-success here would hide the very condition it exists to
+ * surface.
  */
-import type { Kysely } from "kysely";
+import { sql, type Kysely } from "kysely";
 import { DatabaseError, isAppError } from "../../../core/errors.js";
 import { isPoolExhaustedError, retryWithBackoff, type RetryOptions } from "./resilience.js";
 import type { Database } from "./db.js";
+
+/**
+ * Result of {@link DbQueryCapability.healthCheck}. Structurally matches the
+ * generic `healthCheck(): Promise<{ healthy, error? }>` shape
+ * `core/introspect.ts` duck-types any provided capability against (feature
+ * #24) — this module does not import introspect.ts, and doesn't need to,
+ * for that wiring to work.
+ */
+export interface DbHealthCheckResult {
+  readonly healthy: boolean;
+  /** Present only when `healthy` is `false` — a safe-to-log description of what failed. */
+  readonly error?: string;
+}
 
 /** The object registered with the capability broker as the `db:query` provider. */
 export interface DbQueryCapability {
@@ -75,6 +104,11 @@ export interface DbQueryCapability {
    * touch a raw SQL string itself (see this module's docs).
    */
   query<T>(fn: (db: Kysely<Database>) => Promise<T>): Promise<T>;
+  /**
+   * Run a trivial `SELECT 1` against the database and report whether it
+   * answered. Never rejects — see this module's "Health check" docs.
+   */
+  healthCheck(): Promise<DbHealthCheckResult>;
 }
 
 /** Options controlling {@link createDbQueryCapability}'s feature #23 retry-on-transient-connection-error behavior. */
@@ -112,6 +146,14 @@ export function createDbQueryCapability(
           });
         }
         throw new DatabaseError(`db:query failed: ${describeError(cause)}`, { cause });
+      }
+    },
+    async healthCheck(): Promise<DbHealthCheckResult> {
+      try {
+        await sql`SELECT 1`.execute(db);
+        return { healthy: true };
+      } catch (cause) {
+        return { healthy: false, error: describeError(cause) };
       }
     },
   };

@@ -344,6 +344,60 @@ describe("bootstrapKernel — kernel.introspect()", () => {
   });
 });
 
+describe("bootstrapKernel — kernel.introspectWithHealth() (feature #24)", () => {
+  it("reports 'unhealthy' end-to-end for a plugin whose provided capability's healthCheck() fails, without disturbing an unrelated healthy plugin", async () => {
+    const pluginsRoot = trackedTempRoot();
+    // Stands in for database-mysql's real db:query capability (whose
+    // healthCheck() runs a live SELECT 1) without needing an actual MySQL
+    // connection — proves the *wiring* end-to-end through a real
+    // bootstrapKernel(), same as this file's other kernel.introspect() tests.
+    writePluginDir(
+      pluginsRoot,
+      "flaky-db",
+      {
+        id: "flaky-db",
+        version: "1.0.0",
+        depends_on: {},
+        capabilities: { provides: ["db:query"], requires: [] },
+        entry_point: "index.js",
+      },
+      {
+        "index.js":
+          "export const provides = {\n" +
+          '  "db:query": {\n' +
+          "    query: async () => { throw new Error(\"unused\"); },\n" +
+          "    healthCheck: async () => ({ healthy: false, error: \"connect ECONNREFUSED\" }),\n" +
+          "  },\n" +
+          "};\n",
+      },
+    );
+    writePluginDir(
+      pluginsRoot,
+      "greeter",
+      {
+        id: "greeter",
+        version: "1.0.0",
+        depends_on: {},
+        capabilities: { provides: ["demo:greet"], requires: [] },
+        entry_point: "index.js",
+      },
+      { "index.js": 'export const provides = {\n  "demo:greet": () => "hello",\n};\n' },
+    );
+
+    const kernel = await bootstrapKernel({ pluginsRoot, env: {} });
+    const report = await kernel.introspectWithHealth();
+
+    expect(report.plugins.find((plugin) => plugin.id === "flaky-db")?.health).toEqual({
+      status: "unhealthy",
+      error: "connect ECONNREFUSED",
+    });
+    // A plugin with nothing health-checkable is unaffected — no `health` key at all.
+    const greeter = report.plugins.find((plugin) => plugin.id === "greeter");
+    expect(greeter?.status).toBe("loaded");
+    expect(greeter?.health).toBeUndefined();
+  });
+});
+
 describe("formatFatalStartupError", () => {
   it("formats an AppError as a single line with its code and message, never a stack trace", () => {
     const error = new ConfigError("Invalid configuration: PORT is required");
