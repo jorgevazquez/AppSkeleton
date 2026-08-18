@@ -19,17 +19,26 @@
  * render" means in practice: the AST shape and the closure tree it
  * produces are both computed once, at `compileTemplate()` time.
  *
+ * ## Auto-escaping (feature #47)
+ *
+ * Every `{{variable}}` interpolation is escaped by default, and there is
+ * no template syntax to opt out. Before compiling the AST into closures,
+ * `compileTemplate` runs {@link annotateEscapeContexts} (html-context.ts)
+ * over it once: a small HTML-tokenizer state machine that replays the
+ * template's literal text in source order and records, per `{{variable}}`
+ * node, which syntactic context it landed in — HTML body text, an HTML
+ * attribute value, a URL-bearing attribute (`href`, `src`, ...), or JS
+ * (`<script>` content or an `on*=` event-handler attribute). Each
+ * variable's compiled closure then runs the matching escaper from
+ * escape.ts against the stringified value before appending it to output.
+ * See html-context.ts's module doc comment for exactly what is and isn't
+ * modeled, and escape.ts's for what each escaper defends against.
+ *
  * ## Deliberately out of scope here
  *
- * - Auto-escaping / XSS-safe output contexts — feature #47.
  * - Layouts and partials/components — features #48 and #49.
  * - An explicit raw/unescaped-output helper — feature #50.
  * - Compiled-template caching across calls — feature #53.
- *
- * `{{var}}` output here is a plain, unescaped `String(value)` — a
- * conscious, temporary state matching this feature's literal scope
- * (variables/conditionals/loops only); feature #47 layers escaping on
- * top of this compiler without changing its parse/compile contract.
  *
  * ## Grammar
  *
@@ -56,6 +65,8 @@
  */
 import { ValidationError } from "../../../core/errors.js";
 import { err, ok, type Result } from "../../../core/types.js";
+import { escapeForContext, type EscapeContext } from "./escape.js";
+import { annotateEscapeContexts } from "./html-context.js";
 
 /** Arbitrary render-time data. A template's `{{...}}` paths are resolved against this. */
 export type TemplateContext = Record<string, unknown>;
@@ -419,13 +430,16 @@ function stringifyValue(value: unknown): string {
 
 type CompiledNode = (scope: Scope, out: string[]) => void;
 
+/** Per-`VariableNode` escape context, computed once by {@link annotateEscapeContexts} before compiling. */
+type EscapeContexts = ReadonlyMap<VariableNode, EscapeContext>;
+
 function runCompiled(nodes: readonly CompiledNode[], scope: Scope, out: string[]): void {
   for (const node of nodes) {
     node(scope, out);
   }
 }
 
-function compileNode(node: TemplateNode): CompiledNode {
+function compileNode(node: TemplateNode, contexts: EscapeContexts): CompiledNode {
   switch (node.kind) {
     case "text": {
       const value = node.value;
@@ -435,14 +449,17 @@ function compileNode(node: TemplateNode): CompiledNode {
     }
     case "variable": {
       const path = node.path;
+      // Every interpolation is escaped for its compile-time-detected context — see the module
+      // doc comment's "Auto-escaping" section. There is no template syntax that opts out of this.
+      const context = contexts.get(node) ?? "html";
       return (scope, out) => {
-        out.push(stringifyValue(resolve(scope, path)));
+        out.push(escapeForContext(stringifyValue(resolve(scope, path)), context));
       };
     }
     case "if": {
       const path = node.path;
-      const consequent = compileNodes(node.consequent);
-      const alternate = compileNodes(node.alternate);
+      const consequent = compileNodes(node.consequent, contexts);
+      const alternate = compileNodes(node.alternate, contexts);
       return (scope, out) => {
         if (isTruthy(resolve(scope, path))) {
           runCompiled(consequent, scope, out);
@@ -453,7 +470,7 @@ function compileNode(node: TemplateNode): CompiledNode {
     }
     case "each": {
       const path = node.path;
-      const body = compileNodes(node.body);
+      const body = compileNodes(node.body, contexts);
       return (scope, out) => {
         const collection = resolve(scope, path);
         if (Array.isArray(collection)) {
@@ -473,8 +490,8 @@ function compileNode(node: TemplateNode): CompiledNode {
   }
 }
 
-function compileNodes(nodes: readonly TemplateNode[]): CompiledNode[] {
-  return nodes.map(compileNode);
+function compileNodes(nodes: readonly TemplateNode[], contexts: EscapeContexts): CompiledNode[] {
+  return nodes.map((node) => compileNode(node, contexts));
 }
 
 // ---------------------------------------------------------------------------
@@ -497,7 +514,8 @@ export function compileTemplate(source: string): Result<CompiledTemplate, Valida
   if (!astResult.ok) {
     return astResult;
   }
-  const compiled = compileNodes(astResult.value);
+  const contexts = annotateEscapeContexts(astResult.value);
+  const compiled = compileNodes(astResult.value, contexts);
   return ok({
     render(context: TemplateContext = {}): string {
       const out: string[] = [];
