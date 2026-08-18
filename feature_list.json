@@ -478,7 +478,7 @@
       "Write a test asserting seeding twice does not create duplicate roles"
     ],
     "depends_on": [34, 36],
-    "passes": false
+    "passes": true
   },
   {
     "id": 38,
