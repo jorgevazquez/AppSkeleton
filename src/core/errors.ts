@@ -144,6 +144,54 @@ export class CapabilityDeniedError extends AppError {
 }
 
 /**
+ * A route registered via `registerRoute()`'s `requiredPermission` option
+ * (feature #65 — "RBAC middleware integration: per-route required
+ * permission") was requested by a caller with no valid session at all —
+ * step 2's "401 for unauthenticated" half of the split. Thrown by
+ * api-gateway's RBAC `preHandler` hook (`api-gateway/src/rbac-protection.ts`)
+ * before `rbac:check` is ever consulted: there is no user identity yet to
+ * check a permission against, so asking the policy engine anything would be
+ * meaningless. See {@link AuthorizationError}'s docs for why this class's
+ * `publicMessage` stays just as generic — the 401-vs-403 status code itself
+ * is the only distinction step 2 asks this boundary to make.
+ */
+export class AuthenticationError extends AppError {
+  readonly code = "UNAUTHENTICATED";
+  readonly statusCode = 401;
+
+  protected override defaultPublicMessage(): string {
+    return "Authentication is required to access this resource.";
+  }
+}
+
+/**
+ * A route registered via `registerRoute()`'s `requiredPermission` option
+ * (feature #65) was requested by a caller who *does* carry a valid
+ * session, but whose roles do not grant the route's required
+ * `resource:action` permission per `rbac:check` (feature #39) — step 2's
+ * "403 for authenticated-but-unauthorized" half. `publicMessage` is
+ * deliberately the same generic "you do not have permission" text
+ * regardless of *which* permission was missing or *why* (no session at
+ * all vs. a session with the wrong roles both collapse to this one safe
+ * string) — the 401-vs-403 status split is already the maximum
+ * distinction step 2 wants exposed to a client; naming the specific
+ * permission/role in a client-visible message would leak more about the
+ * deployment's authorization model than necessary. The full detail
+ * (route, required permission, user id) is still available internally via
+ * this error's `message` — never serialized to a client, see this
+ * module's own `AppError` docs above — for an operator debugging a 403
+ * from their own logs.
+ */
+export class AuthorizationError extends AppError {
+  readonly code = "FORBIDDEN";
+  readonly statusCode = 403;
+
+  protected override defaultPublicMessage(): string {
+    return "You do not have permission to perform this action.";
+  }
+}
+
+/**
  * A state-changing request (POST/PUT/PATCH/DELETE) failed CSRF validation
  * (feature #64 — "CSRF protection for state-changing routes"): either no
  * CSRF token was presented at all, or the token presented via the

@@ -43,6 +43,7 @@ import { registerCsrfProtection } from "./src/csrf.js";
 import { registerErrorHandling } from "./src/error-handler.js";
 import { loadRateLimitConfig } from "./src/rate-limit-config.js";
 import { registerRateLimiting } from "./src/rate-limit.js";
+import { registerRbacProtection } from "./src/rbac-protection.js";
 import { registerRequestId } from "./src/request-id.js";
 import {
   createRouteRegistrar,
@@ -129,11 +130,22 @@ export type {
   HttpMethod,
   HttpRouteRegistrationCapability,
   JsonSchemaObject,
+  ParsedRequiredPermission,
   RegisterRouteOptions,
   RouteHandler,
   RouteRequestSchema,
   RouteSchema,
 } from "./src/route-capability.js";
+
+// Re-exported so a consuming plugin (or a test) can wire the RBAC
+// `preHandler` hook onto a standalone test instance, or override how it
+// resolves `SessionConfig`, without reaching into this plugin's `src/`
+// internals — feature #65, see `./src/rbac-protection.ts` for the full
+// contract.
+export {
+  registerRbacProtection,
+  type RegisterRbacProtectionOptions,
+} from "./src/rbac-protection.js";
 
 // Re-exported so a consuming plugin (or a test) can reference the default
 // API version segment `registerRoute()` prefixes routes with (feature #62)
@@ -269,6 +281,20 @@ export async function buildApp(
   // onRequest), and ./src/route-capability.ts's `csrfExempt` option for the
   // audited opt-out (step 2).
   registerCsrfProtection(built);
+
+  // Wired before any route is registered (feature #65) so every route a
+  // consumer plugin registers via registerRoute()'s `requiredPermission`
+  // option is protected from the moment it exists — /health itself sets no
+  // `requiredPermission`, so this hook is a no-op for it either way. Reads
+  // `request.cookies` (already populated by registerSessionCookies above)
+  // to resolve the caller's session, and calls `rbac:check` through
+  // `context.capabilities` — the same narrow, identity-bound facade this
+  // plugin's own `onEnable` was handed, never the full broker. See
+  // ./src/rbac-protection.ts's module docs for why the actual
+  // `capabilities.obtain("rbac:check")` call stays lazy (inside the hook,
+  // not here) despite this being wired at the same "before any route"
+  // point as every other hook in this function.
+  registerRbacProtection(built, context.capabilities);
 
   built.get("/health", async () => ({ status: "ok" }));
 

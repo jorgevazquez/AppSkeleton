@@ -134,10 +134,70 @@ export interface RegisterRouteOptions {
    * against — it is on the caller to pass a tighter value.
    */
   readonly rateLimit?: RateLimitOptions | false;
+
+  /**
+   * Gate this route behind an RBAC permission check (feature #65, step 1).
+   * Omit this for every route that doesn't need access control — the
+   * overwhelming majority of routes (`/health`, and anything intentionally
+   * public). When set, api-gateway's own `rbac:check`-backed `preHandler`
+   * hook (`./rbac-protection.ts`) runs before this route's `handler` ever
+   * does: it resolves the caller's identity from their session cookie
+   * (feature #63's `readSessionId()` — the bare session id doubles as the
+   * `userId` `rbac:check` is asked about, since no separate user-account
+   * identity exists yet) and checks it against this permission via the
+   * `rbac:check` capability (feature #39).
+   *
+   * A `"resource:action"` string — the exact grammar `rbac`'s own
+   * permission strings use (e.g. `"widgets:read"`, matching whatever
+   * `rolePermissions` grants were assigned via `rbac:manage`/seed data).
+   * Validated at registration time (step 1's "runtime backstop", the same
+   * enforce-both-compile-and-runtime spirit as {@link
+   * assertDeclaresRequestAndResponseSchema} above) — `registerRoute()`
+   * throws {@link ValidationError} for anything present but malformed, so a
+   * typo'd permission string fails loudly at boot rather than silently
+   * never matching any grant.
+   *
+   * See `core/errors.ts`'s `AuthenticationError` (401 — no/invalid
+   * session) and `AuthorizationError` (403 — valid session, permission
+   * denied) for the exact split this produces (step 2): the hook never
+   * reveals more than that binary distinction to the client either way.
+   */
+  readonly requiredPermission?: string;
 }
 
 /** Minimum length {@link RegisterRouteOptions.csrfExempt}'s `reason` must meet — see its docs. */
 export const MIN_CSRF_EXEMPT_REASON_LENGTH = 20;
+
+/**
+ * The parsed `{resource, action}` form of {@link
+ * RegisterRouteOptions.requiredPermission} — what actually ends up on a
+ * protected route's `config.requiredPermission` (see {@link
+ * createRouteRegistrar}), so `./rbac-protection.ts`'s `preHandler` hook
+ * never has to re-parse the raw string on every request.
+ */
+export interface ParsedRequiredPermission {
+  readonly resource: string;
+  readonly action: string;
+}
+
+/**
+ * Single lowercase-kebab-case segment: starts with a letter, digits
+ * allowed, single hyphens between parts. Deliberately duplicated from the
+ * `rbac` plugin's own `src/permission.ts` grammar (rather than imported)
+ * for the exact reason that module documents duplicating
+ * `core/manifest.ts`'s `CAPABILITY_PATTERN` instead of importing it:
+ * api-gateway must stay free of any dependency on another plugin's
+ * internals — spec.md's "no plugin imports another plugin's internals
+ * directly — only kernel-brokered capabilities" — even though the two
+ * plugins deliberately agree on the same `resource:action` grammar so a
+ * permission string here and one `rbac:manage` accepts never disagree.
+ */
+const REQUIRED_PERMISSION_SEGMENT = "[a-z][a-z0-9]*(?:-[a-z0-9]+)*";
+
+/** `resource:action`, each segment {@link REQUIRED_PERMISSION_SEGMENT} — see that constant's docs. */
+const REQUIRED_PERMISSION_PATTERN = new RegExp(
+  `^(${REQUIRED_PERMISSION_SEGMENT}):(${REQUIRED_PERMISSION_SEGMENT})$`,
+);
 
 /** What `http:route` exposes for *registering* new routes — merged into `HttpRouteCapability` alongside `getApp()` in `../index.ts`. */
 export interface HttpRouteRegistrationCapability {
@@ -260,6 +320,46 @@ function assertValidCsrfExemptReason(options: RegisterRouteOptions): void {
 }
 
 /**
+ * Runtime backstop for {@link RegisterRouteOptions.requiredPermission} —
+ * same "can't be type-checking alone" reasoning as {@link
+ * assertDeclaresRequestAndResponseSchema}/{@link assertValidCsrfExemptReason}
+ * above. Returns the parsed `{resource, action}` form when
+ * `requiredPermission` is present and well-formed, so `./rbac-protection.ts`'s
+ * `preHandler` hook never has to re-parse it per-request; returns
+ * `undefined` when the option was omitted entirely, which is the
+ * overwhelming majority of routes. Throws {@link ValidationError} for
+ * anything present but malformed.
+ */
+function parseRequiredPermission(
+  options: RegisterRouteOptions,
+): ParsedRequiredPermission | undefined {
+  if (options.requiredPermission === undefined) {
+    return undefined;
+  }
+
+  const routeLabel = `${options.method} ${options.path}`;
+  const match = REQUIRED_PERMISSION_PATTERN.exec(options.requiredPermission);
+  if (!match) {
+    throw new ValidationError(
+      `registerRoute("${routeLabel}"): requiredPermission "${options.requiredPermission}" is not a ` +
+        `valid "resource:action" permission string (e.g. "widgets:read") — expected two lowercase-` +
+        `kebab-case segments separated by a single colon.`,
+      {
+        details: {
+          method: options.method,
+          path: options.path,
+          requiredPermission: options.requiredPermission,
+        },
+      },
+    );
+  }
+
+  const resource = match[1] as string;
+  const action = match[2] as string;
+  return { resource, action };
+}
+
+/**
  * Build the `registerRoute` implementation `../index.ts` merges into its
  * `http:route` capability object. `getApp` is passed in (rather than a live
  * instance) so this module can be constructed once at module scope, exactly
@@ -273,6 +373,7 @@ export function createRouteRegistrar(getApp: () => ApiGatewayApp): HttpRouteRegi
     registerRoute(options: RegisterRouteOptions): void {
       assertDeclaresRequestAndResponseSchema(options);
       assertValidCsrfExemptReason(options);
+      const requiredPermission = parseRequiredPermission(options);
 
       const versionedPath = buildVersionedPath(options, options.version ?? DEFAULT_API_VERSION);
 
@@ -288,12 +389,19 @@ export function createRouteRegistrar(getApp: () => ApiGatewayApp): HttpRouteRegi
         );
       }
 
-      const routeConfig: { csrfExempt?: true; rateLimit?: RateLimitOptions | false } = {};
+      const routeConfig: {
+        csrfExempt?: true;
+        rateLimit?: RateLimitOptions | false;
+        requiredPermission?: ParsedRequiredPermission;
+      } = {};
       if (options.csrfExempt) {
         routeConfig.csrfExempt = true;
       }
       if (options.rateLimit !== undefined) {
         routeConfig.rateLimit = options.rateLimit;
+      }
+      if (requiredPermission !== undefined) {
+        routeConfig.requiredPermission = requiredPermission;
       }
 
       getApp().route({

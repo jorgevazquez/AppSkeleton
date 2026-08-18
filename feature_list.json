@@ -839,7 +839,7 @@
       "Write an integration test for allowed, unauthenticated, and forbidden cases on a protected fixture route"
     ],
     "depends_on": [59, 39],
-    "passes": false
+    "passes": true
   },
   {
     "id": 66,
