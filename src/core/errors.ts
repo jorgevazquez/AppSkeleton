@@ -270,6 +270,27 @@ export class SeedError extends AppError {
   }
 }
 
+/**
+ * A caller exceeded the configured rate limit (feature #66 — "Configurable
+ * rate limiting (global and per-route)"). Thrown from
+ * `api-gateway/src/rate-limit.ts`'s `@fastify/rate-limit` `errorResponseBuilder`
+ * in place of that plugin's own default plain-`Error` shape, so a
+ * rate-limited response gets the same `{code, message, details}` envelope
+ * every other AppError produces — via `error-handler.ts`'s `isAppError()`
+ * branch — instead of falling through to the generic 4xx envelope. The
+ * `Retry-After` header itself is set directly on the reply by
+ * `@fastify/rate-limit` before this error is even constructed, so it is
+ * present regardless of this class — see `rate-limit.ts`'s module docs.
+ */
+export class RateLimitError extends AppError {
+  readonly code = "RATE_LIMIT_EXCEEDED";
+  readonly statusCode = 429;
+
+  protected override defaultPublicMessage(): string {
+    return "Too many requests. Please try again later.";
+  }
+}
+
 /** Narrow an unknown thrown value down to the AppError taxonomy. */
 export function isAppError(error: unknown): error is AppError {
   return error instanceof AppError;

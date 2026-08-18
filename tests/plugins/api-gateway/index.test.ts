@@ -95,7 +95,7 @@ describe("api-gateway plugin — lifecycle module (feature #58)", () => {
 
   it("uses the lifecycle context's logger level for its own Fastify logger", async () => {
     const logger = withContext(createLogger({ level: "warn" }), { plugin: "api-gateway" });
-    apiGatewayModule.onEnable({
+    await apiGatewayModule.onEnable({
       manifest: {
         id: "api-gateway",
         version: "0.1.0",
