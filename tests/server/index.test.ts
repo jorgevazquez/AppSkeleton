@@ -1,5 +1,6 @@
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,11 @@ const REAL_PLUGINS_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../src/plugins",
 );
+
+/** Repo root — two levels up from this file (`tests/server/index.test.ts`). */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const REAL_SERVER_ENTRY = path.join(REPO_ROOT, "src/server/index.ts");
+const TSX_BIN = path.join(REPO_ROOT, "node_modules/.bin/tsx");
 
 /** Ask the OS for a currently-free TCP port by briefly binding to port 0 and reading it back. */
 async function findFreePort(): Promise<number> {
@@ -558,4 +564,94 @@ describe("listen — starts the HTTP server only after every plugin has finished
       await kernel.httpApp?.close();
     }
   });
+});
+
+describe("process-level fail-fast on invalid config (feature #117)", () => {
+  it(
+    "exits non-zero with a single clear message naming the offending variable, and never binds the port",
+    async () => {
+      // Occupy a real, known port ourselves *before* spawning the child, and
+      // keep it listening for the whole test. If `main()` ever reached
+      // `listen()` — i.e. if config validation didn't abort the boot before
+      // any plugin/HTTP work started — Fastify's own `.listen()` call would
+      // collide with this probe (EADDRINUSE) instead of exiting cleanly with
+      // just the ConfigError below, and the probe would stop being able to
+      // accept new connections. So "the probe still happily accepts a
+      // connection after the child has exited" is direct, positive proof the
+      // child process never so much as attempted to bind a port — not just
+      // that a port happens to be free afterward.
+      const probe = createServer((socket) => socket.end());
+      const port = await new Promise<number>((resolve, reject) => {
+        probe.on("error", reject);
+        probe.listen(0, "127.0.0.1", () => {
+          const address = probe.address();
+          if (address === null || typeof address === "string") {
+            reject(new Error("Could not determine the probe's port."));
+            return;
+          }
+          resolve(address.port);
+        });
+      });
+
+      try {
+        // LOG_LEVEL set to an invalid enum value is the one thing wrong with
+        // this config — PORT itself is valid (and equal to the probe's own
+        // port), so any attempt to listen would be unambiguously a bug, not
+        // an unrelated port conflict.
+        const child = spawn(TSX_BIN, [REAL_SERVER_ENTRY], {
+          cwd: REPO_ROOT,
+          env: { ...process.env, PORT: String(port), LOG_LEVEL: "not-a-real-level" },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk: Buffer) => {
+          stdout += chunk.toString("utf-8");
+        });
+        child.stderr.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString("utf-8");
+        });
+
+        const { code } = await new Promise<{ code: number | null; signal: string | null }>(
+          (resolve, reject) => {
+            child.on("error", reject);
+            child.on("exit", (exitCode, signal) => resolve({ code: exitCode, signal }));
+          },
+        );
+
+        // Fails fast and non-zero — never a partial/half-started server left
+        // hanging with a zero (success-looking) exit code.
+        expect(code).not.toBeNull();
+        expect(code).not.toBe(0);
+
+        // A single clear line identifying the offending variable, no stack trace.
+        const stderrLines = stderr.trim().split("\n");
+        expect(stderrLines).toHaveLength(1);
+        expect(stderr).toContain("Fatal startup error:");
+        expect(stderr).toContain("CONFIG_ERROR");
+        expect(stderr).toContain("LOG_LEVEL");
+        expect(stderr).not.toMatch(/\bat\b.*:\d+:\d+/);
+
+        // Nothing was ever printed suggesting the kernel finished booting or
+        // an HTTP server came up.
+        expect(stdout.trim()).toBe("");
+        expect(stdout).not.toContain("Kernel bootstrap complete");
+
+        // The probe — not the child — still exclusively owns the port: a
+        // fresh connection succeeds and is served by the probe, proving the
+        // child process exited before ever binding it.
+        await new Promise<void>((resolve, reject) => {
+          const socket = connect({ port, host: "127.0.0.1" }, () => {
+            socket.end();
+          });
+          socket.on("close", resolve);
+          socket.on("error", reject);
+        });
+      } finally {
+        await new Promise<void>((resolve) => probe.close(() => resolve()));
+      }
+    },
+    15_000,
+  );
 });
