@@ -67,21 +67,30 @@
  *     check with nothing separate to invalidate (feature #35 layers caching
  *     on top of this later).
  *
- * `rbac:manage` itself is intentionally NOT implemented here — this plugin's
- * manifest declares it under `capabilities.provides` (feature #31), so the
- * *real* rbac plugin will not fully load via the kernel's plugin loader
- * (`loader.ts` requires every declared `provides` id to have an
- * implementation before a plugin counts as loaded) until feature #36 adds
- * it — matching the same, already-accepted interim state `database-mysql`
- * and `html-renderer` are in for their own not-yet-fully-wired manifests.
- * Tests for `rbac:check` alone use a purpose-built manifest fixture
- * declaring only `["rbac:check"]`, exactly like
- * `route-capability.integration.test.ts` does for `http:route`.
+ * `rbac:manage` (feature #36 — "Role and permission management
+ * operations") is implemented in `./src/manage.ts`, wired in below as this
+ * plugin's second `provides` entry. `manage.ts` is storage-agnostic (see
+ * its own docs); the adapter this module builds ({@link
+ * createInMemoryManagementStore}) backs it with the exact same
+ * {@link policyStore} arrays `check()` reads, plus two new catalogs
+ * ({@link roleCatalog}/{@link permissionCatalog}) for role/permission
+ * entities themselves — so a role created or a grant assigned through
+ * `rbac:manage` takes effect on the very next `check()` call with nothing
+ * separate to invalidate, exactly as this module anticipated before
+ * feature #36 existed. Every `rbac:manage` operation is itself gated by a
+ * `check()` call for the caller's own `rbac:manage` grant — see
+ * `manage.ts`'s "Self-referential authorization" docs.
  */
 import type { AuditSink } from "../../core/audit.js";
+import { NotFoundError, ValidationError } from "../../core/errors.js";
 import type { PluginLifecycleContext } from "../../core/loader.js";
+import {
+  createRbacManagementApi,
+  type RbacManagementApi,
+  type RbacManagementStore,
+} from "./src/manage.js";
 import { can, type PolicyStore } from "./src/policy.js";
-import type { RolePermission, UserRole } from "./src/types.js";
+import type { Permission, Role, RolePermission, UserRole } from "./src/types.js";
 
 /**
  * What `rbac:check` hands back to a consuming plugin.
@@ -109,19 +118,151 @@ export const policyStore: { userRoles: UserRole[]; rolePermissions: RolePermissi
 };
 
 /**
- * Reset {@link policyStore} and {@link auditState} back to their fresh-boot
- * defaults. Test-only convenience so independent test cases sharing this
- * module's singleton state (ordinary ESM module caching within a test
- * file/process) don't leak roles, permissions, or a previous test's audit
- * sink/sample counter into each other — production code has no reason to
- * call this.
+ * In-memory role/permission catalogs backing `rbac:manage` (feature #36) —
+ * keyed by {@link Role.id}/{@link Permission.id}, exported mutable state
+ * mirroring {@link policyStore}'s own precedent (see that export's docs)
+ * so tests (and, until a real permission-catalog-populating mechanism such
+ * as feature #37's seed data lands, any other caller) can seed a
+ * permission directly with a plain `.set(...)` call, no management
+ * operation required. `rbac:manage` itself never creates permissions —
+ * feature #36's own description scopes it to role create/update/delete
+ * plus permission/role assign/revoke — so {@link permissionCatalog}
+ * starts, and stays, empty unless something outside this module populates
+ * it; a `rbac:manage` caller trying to assign an unseeded permission
+ * correctly gets `manage.ts`'s "nonexistent permission" validation error.
+ */
+export const roleCatalog: Map<string, Role> = new Map();
+export const permissionCatalog: Map<string, Permission> = new Map();
+
+/**
+ * Reset {@link policyStore}, {@link roleCatalog}, {@link permissionCatalog},
+ * and {@link auditState} back to their fresh-boot defaults. Test-only
+ * convenience so independent test cases sharing this module's singleton
+ * state (ordinary ESM module caching within a test file/process) don't leak
+ * roles, permissions, assignments, or a previous test's audit sink/sample
+ * counter into each other — production code has no reason to call this.
  */
 export function resetPolicyStoreForTests(): void {
   policyStore.userRoles.length = 0;
   policyStore.rolePermissions.length = 0;
+  roleCatalog.clear();
+  permissionCatalog.clear();
   auditState.sink = undefined;
   auditState.allowSampleEvery = 1;
   auditState.allowCount = 0;
+}
+
+/**
+ * Remove every element of `array` matching `predicate`, in place. Used by
+ * {@link createInMemoryManagementStore}'s revoke/delete operations instead
+ * of reassigning `policyStore.userRoles`/`policyStore.rolePermissions` to a
+ * new array — reassignment would detach any reference a caller already
+ * holds onto (e.g. this module's own tests, which push directly into
+ * `policyStore.rolePermissions`/`.userRoles`, per {@link policyStore}'s own
+ * docs), whereas an in-place splice keeps every existing reference valid.
+ */
+function removeInPlace<T>(array: T[], predicate: (item: T) => boolean): void {
+  for (let i = array.length - 1; i >= 0; i -= 1) {
+    const item = array[i];
+    if (item !== undefined && predicate(item)) {
+      array.splice(i, 1);
+    }
+  }
+}
+
+/**
+ * The {@link RbacManagementStore} implementation `rbac:manage` (feature
+ * #36) is currently wired with — see this module's doc comment for why an
+ * in-memory adapter over {@link policyStore}/{@link roleCatalog}/{@link
+ * permissionCatalog} rather than the real `db:query`-backed `store.ts`
+ * (feature #34): `check()` itself still reads the same in-memory
+ * `policyStore`, so backing `rbac:manage` the same way keeps every
+ * management mutation visible to the very next `check()` call with nothing
+ * separate to invalidate, and keeps this plugin's manifest exactly as
+ * declared today (no new `capabilities.requires`/`depends_on` on
+ * `database-mysql`, whose own entry point does not exist yet).
+ */
+function createInMemoryManagementStore(): RbacManagementStore {
+  return {
+    async getRole(id) {
+      return roleCatalog.get(id);
+    },
+
+    async listRoles() {
+      return Array.from(roleCatalog.values());
+    },
+
+    async createRole(role) {
+      if (roleCatalog.has(role.id)) {
+        throw new ValidationError(`Role "${role.id}" already exists.`, {
+          details: { roleId: role.id },
+        });
+      }
+      roleCatalog.set(role.id, role);
+    },
+
+    async updateRole(id, changes) {
+      const existing = roleCatalog.get(id);
+      if (!existing) {
+        throw new NotFoundError(`Role "${id}" does not exist.`, { details: { roleId: id } });
+      }
+      const name = changes.name ?? existing.name;
+      const description =
+        "description" in changes ? (changes.description ?? undefined) : existing.description;
+      const updated: Role = description === undefined ? { id, name } : { id, name, description };
+      roleCatalog.set(id, updated);
+      return updated;
+    },
+
+    async deleteRole(id) {
+      roleCatalog.delete(id);
+      removeInPlace(policyStore.rolePermissions, (grant) => grant.roleId === id);
+      removeInPlace(policyStore.userRoles, (assignment) => assignment.roleId === id);
+    },
+
+    async getPermission(id) {
+      return permissionCatalog.get(id);
+    },
+
+    async assignPermissionToRole(roleId, permissionId) {
+      const alreadyGranted = policyStore.rolePermissions.some(
+        (grant) => grant.roleId === roleId && grant.permissionId === permissionId,
+      );
+      if (alreadyGranted) {
+        throw new ValidationError(
+          `Permission "${permissionId}" is already assigned to role "${roleId}".`,
+          { details: { roleId, permissionId } },
+        );
+      }
+      policyStore.rolePermissions.push({ roleId, permissionId });
+    },
+
+    async revokePermissionFromRole(roleId, permissionId) {
+      removeInPlace(
+        policyStore.rolePermissions,
+        (grant) => grant.roleId === roleId && grant.permissionId === permissionId,
+      );
+    },
+
+    async assignRoleToUser(userId, roleId) {
+      const alreadyAssigned = policyStore.userRoles.some(
+        (assignment) => assignment.userId === userId && assignment.roleId === roleId,
+      );
+      if (alreadyAssigned) {
+        throw new ValidationError(`Role "${roleId}" is already assigned to user "${userId}".`, {
+          details: { userId, roleId },
+        });
+      }
+      policyStore.userRoles.push({ userId, roleId });
+    },
+
+    async revokeRoleFromUser(userId, roleId) {
+      removeInPlace(
+        policyStore.userRoles,
+        (assignment) => assignment.userId === userId && assignment.roleId === roleId,
+      );
+    },
+  };
 }
 
 /**
@@ -211,12 +352,21 @@ export function onInstall(context: PluginLifecycleContext): void {
 
 /**
  * Registered with the broker before this module's lifecycle hooks run (see
- * `loader.ts`'s declare-before-hooks ordering). `rbac:check` needs no
- * per-instance construction (unlike api-gateway's Fastify instance, which
- * needs `onEnable`) — `check()` is a stable closure over {@link policyStore}
- * from the moment this module is imported; `provides` is therefore built at
- * module scope here, same as before {@link onInstall} existed.
+ * `loader.ts`'s declare-before-hooks ordering). Neither `rbac:check` nor
+ * `rbac:manage` needs per-instance construction (unlike api-gateway's
+ * Fastify instance, which needs `onEnable`) — `check()` is a stable closure
+ * over {@link policyStore} from the moment this module is imported, and
+ * {@link managementApi} (feature #36) is built once, at module scope, over
+ * the in-memory adapter {@link createInMemoryManagementStore} returns —
+ * itself a closure over the same module-level state — plus `check` as its
+ * self-referential authorizer; `provides` is therefore built at module
+ * scope here, same as before {@link onInstall} existed.
  */
+const managementApi: RbacManagementApi = createRbacManagementApi(createInMemoryManagementStore(), {
+  check,
+});
+
 export const provides: Readonly<Record<string, unknown>> = {
   "rbac:check": { check } satisfies RbacCheckCapability,
+  "rbac:manage": managementApi,
 };
