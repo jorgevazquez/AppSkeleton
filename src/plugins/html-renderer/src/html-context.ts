@@ -353,6 +353,17 @@ function walk(
       case "each":
         walkEach(node, state, contexts);
         break;
+      case "block":
+        // Not a branch: a block's body always renders inline at this exact position (it's
+        // either its own default content or a layout override — see template.ts's "block" case
+        // in compileNode), so scanning continues with the *same* mutable state rather than a
+        // clone, exactly like a plain sequence of sibling nodes.
+        walk(node.body, state, contexts);
+        break;
+      case "extends":
+        // No literal text of its own to scan, and never survives into the tree
+        // compileResolvedNodes actually compiles (see template.ts).
+        break;
     }
   }
 }
