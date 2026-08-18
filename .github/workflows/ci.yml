@@ -51,6 +51,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Fails the build on any high/critical-severity known vulnerability in the
+      # dependency tree (feature #104). See docs/security.md for the remediation
+      # process a flagged finding should follow. `npm ci` above already pins
+      # exact versions from package-lock.json, so this audits precisely what
+      # actually gets installed, not a resolvable-but-unused range.
+      - name: Dependency vulnerability scan
+        run: npm audit --audit-level=high
+
       - name: Lint
         run: npm run lint
 
