@@ -85,7 +85,11 @@ import { createLogger, type Logger } from "../core/logger.js";
 import { validateManifest, type PluginManifest } from "../core/manifest.js";
 import { createPluginStatusTracker, type PluginStatusTracker } from "../core/plugin-status.js";
 import { scanPluginDirectories, type PluginScanEntry } from "../core/registry.js";
-import { isErr } from "../core/types.js";
+import {
+  disablePlugin as disablePluginRuntime,
+  enablePlugin as enablePluginRuntime,
+} from "../core/runtime-control.js";
+import { isErr, type Result } from "../core/types.js";
 // Type-only: erased at compile time, so this does not create a runtime
 // dependency from the kernel on a specific plugin's module — the kernel
 // still only ever *reaches* api-gateway's Fastify instance dynamically,
@@ -122,6 +126,22 @@ export interface Kernel {
    * introspect.ts's `introspectKernel()`.
    */
   introspect(): KernelIntrospectionReport;
+  /**
+   * Disable a loaded plugin at runtime — no full process restart (feature
+   * #16). Runs the plugin's `onDisable` hook, then flips `pluginStatus` so
+   * `introspect()` reports it as `"disabled"` from here on. Rejected
+   * (`Err(PluginLoadError)`) if `pluginId` is not currently loaded, or if
+   * another loaded plugin still depends on it — see runtime-control.ts's
+   * `disablePlugin()` for the exact contract (including idempotency).
+   */
+  disablePlugin(pluginId: string): Promise<Result<void, PluginLoadError>>;
+  /**
+   * Re-enable a plugin previously paused via {@link disablePlugin}. Runs its
+   * `onEnable` hook, then clears its disabled marker so `introspect()`
+   * reports it as `"loaded"` again — see runtime-control.ts's
+   * `enablePlugin()` for the exact contract (including idempotency).
+   */
+  enablePlugin(pluginId: string): Promise<Result<void, PluginLoadError>>;
   /**
    * The Fastify instance the `api-gateway` plugin constructed in its own
    * `onEnable` hook (feature #58), reached only through its `http:route`
@@ -319,6 +339,8 @@ export async function bootstrapKernel(options: BootstrapKernelOptions = {}): Pro
     plugins,
     pluginStatus,
     introspect: () => introspectKernel(plugins, broker, pluginStatus),
+    disablePlugin: (pluginId: string) => disablePluginRuntime(plugins, pluginStatus, pluginId),
+    enablePlugin: (pluginId: string) => enablePluginRuntime(plugins, pluginStatus, pluginId),
     httpApp,
   };
 }
