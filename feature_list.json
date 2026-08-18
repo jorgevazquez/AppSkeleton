@@ -889,7 +889,7 @@
       "Write a test for a fixture list route covering default, custom page size, and out-of-range page requests"
     ],
     "depends_on": [59],
-    "passes": false
+    "passes": true
   },
   {
     "id": 70,

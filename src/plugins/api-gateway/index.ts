@@ -120,6 +120,25 @@ export {
 } from "./src/security-headers-config.js";
 export { registerSecurityHeaders } from "./src/security-headers.js";
 
+// Re-exported so a consuming plugin (or a test) can parse/validate a list
+// route's `?page=`/`?limit=`/`?sort=`/`?order=` query params and apply them
+// to its own Kysely query builder, without reaching into this plugin's
+// `src/` internals — feature #69, see `./src/pagination.ts` for the full
+// contract.
+export {
+  applyListQueryModifiers,
+  DEFAULT_PAGE,
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE,
+  MAX_PAGE_SIZE,
+  parseListQueryParams,
+  SORT_ORDERS,
+  type ParsedListQuery,
+  type ParseListQueryOptions,
+  type RawListQuery,
+  type SortOrder,
+} from "./src/pagination.js";
+
 // Re-exported so a consuming plugin can type-only import everything it
 // needs for `capabilities.obtain<HttpRouteCapability>("http:route")` calls
 // (schema shape, handler signature, etc.) from this one module, the same
