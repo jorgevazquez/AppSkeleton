@@ -465,7 +465,7 @@
       "Write unit tests for each operation including failure paths (duplicate role name, assigning a nonexistent permission)"
     ],
     "depends_on": [33, 34],
-    "passes": false
+    "passes": true
   },
   {
     "id": 37,
