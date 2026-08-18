@@ -542,7 +542,7 @@
       "Write unit tests for malformed inputs at each entry point (not just the parser itself)"
     ],
     "depends_on": [32],
-    "passes": false
+    "passes": true
   },
   {
     "id": 43,
