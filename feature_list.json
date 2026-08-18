@@ -452,7 +452,7 @@
       "Write a test proving a permission revoked mid-session is denied on the very next check, not after the TTL"
     ],
     "depends_on": [33, 34],
-    "passes": false
+    "passes": true
   },
   {
     "id": 36,

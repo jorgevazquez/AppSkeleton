@@ -62,10 +62,11 @@
  *   - feature #34 can swap what backs `PolicyStore` for something read from
  *     `db:query` without changing `check()`'s signature or this module's
  *     `provides` wiring;
- *   - feature #36's eventual `rbac:manage` implementation mutates these same
- *     arrays, so a role/permission change takes effect on the very next
- *     check with nothing separate to invalidate (feature #35 layers caching
- *     on top of this later).
+ *   - feature #36's `rbac:manage` implementation mutates these same
+ *     arrays, so a role/permission change is reflected in `policyStore`
+ *     immediately (feature #35 layers a short-TTL decision cache in front
+ *     of `check()` on top of this, invalidated on every such mutation —
+ *     see "Policy decision caching" below).
  *
  * `rbac:manage` (feature #36 — "Role and permission management
  * operations") is implemented in `./src/manage.ts`, wired in below as this
@@ -75,11 +76,26 @@
  * {@link policyStore} arrays `check()` reads, plus two new catalogs
  * ({@link roleCatalog}/{@link permissionCatalog}) for role/permission
  * entities themselves — so a role created or a grant assigned through
- * `rbac:manage` takes effect on the very next `check()` call with nothing
- * separate to invalidate, exactly as this module anticipated before
- * feature #36 existed. Every `rbac:manage` operation is itself gated by a
- * `check()` call for the caller's own `rbac:manage` grant — see
- * `manage.ts`'s "Self-referential authorization" docs.
+ * `rbac:manage` is reflected in `policyStore` immediately. Every
+ * `rbac:manage` operation is itself gated by a `check()` call for the
+ * caller's own `rbac:manage` grant — see `manage.ts`'s "Self-referential
+ * authorization" docs.
+ *
+ * ## Policy decision caching (feature #35)
+ *
+ * `check()` no longer recomputes `can()` from scratch on every call: a
+ * decision for a given `(userId, action, resource)` triple is memoized in
+ * {@link checkCacheState} for a short TTL ({@link
+ * DEFAULT_CHECK_CACHE_TTL_MS}), since a busy deployment can call `check()`
+ * far more often than roles/permissions actually change. Correctness is
+ * preserved by invalidating the *entire* cache — see {@link
+ * invalidateCheckCache} for why a full clear, not surgical per-key
+ * eviction, is the right granularity here — from every mutating operation
+ * {@link createInMemoryManagementStore} performs, so a role, permission
+ * grant, or user-role assignment change made through `rbac:manage` is
+ * visible on the very next `check()` call, never stale for up to the TTL.
+ * `resetPolicyStoreForTests()` also clears it, so no cached decision from
+ * one test leaks into the next.
  */
 import type { AuditSink } from "../../core/audit.js";
 import { NotFoundError, ValidationError } from "../../core/errors.js";
@@ -135,18 +151,85 @@ export const roleCatalog: Map<string, Role> = new Map();
 export const permissionCatalog: Map<string, Permission> = new Map();
 
 /**
+ * Default TTL, in milliseconds, a cached `check()` decision stays valid
+ * for before it would (absent an invalidating mutation) be recomputed —
+ * see {@link checkCacheState} and this module's "Policy decision caching"
+ * docs above. Short relative to typical session lengths: this cache exists
+ * to collapse bursts of repeated checks (the same request re-checking the
+ * same permission, a render loop calling `check()` per row), not to serve
+ * a decision long after it might have gone stale.
+ */
+export const DEFAULT_CHECK_CACHE_TTL_MS = 5000;
+
+/** One memoized `check()` decision, plus when it stops being valid. */
+interface CheckCacheEntry {
+  readonly allowed: boolean;
+  readonly expiresAt: number;
+}
+
+/**
+ * Backing state for `check()`'s decision cache (feature #35) — exported,
+ * mutable state mirroring {@link policyStore}/{@link auditState}'s own
+ * precedent (see {@link policyStore}'s docs) so tests can inspect/tune it
+ * (e.g. shrink `ttlMs` to assert on expiry) without a dedicated
+ * configuration capability. `entries` is keyed by {@link checkCacheKey}'s
+ * `(userId, action, resource)` encoding.
+ */
+export const checkCacheState: { ttlMs: number; entries: Map<string, CheckCacheEntry> } = {
+  ttlMs: DEFAULT_CHECK_CACHE_TTL_MS,
+  entries: new Map(),
+};
+
+/**
+ * Encode a `(userId, action, resource)` triple as a single cache key.
+ * `JSON.stringify` over the 3-tuple (rather than plain string
+ * concatenation) means no combination of inputs can collide across the
+ * join points — e.g. `userId: "a", action: "b:c"` never collides with
+ * `userId: "a:b", action: "c"` the way naive `${userId}:${action}`
+ * concatenation could.
+ */
+function checkCacheKey(userId: string, action: string, resource: string): string {
+  return JSON.stringify([userId, action, resource]);
+}
+
+/**
+ * Drop every cached `check()` decision immediately. Called by every
+ * mutating {@link createInMemoryManagementStore} operation (feature #35
+ * step 2), so a role/permission/assignment change is visible on the very
+ * next `check()` call, not after the TTL.
+ *
+ * A full clear, not surgical per-key eviction: `can()`'s grants are
+ * additive across a user's roles and wildcard-aware (`policy.ts` rules
+ * 2–3), so a single mutation — e.g. revoking a `"wiki:*"` grant from a
+ * role — can change the cached answer for every action on `wiki`, for
+ * every user holding that role, across keys this function has no cheap
+ * way to enumerate without re-deriving the same join `can()` already does
+ * (at which point the cache buys nothing). Management mutations are rare
+ * relative to `check()` calls — the entire premise of caching decisions in
+ * the first place — so clearing everything on the rare path is correct
+ * and cheap; only checks that outlive the mutation on the (already fast)
+ * hot path recompute once and re-populate the cache.
+ */
+export function invalidateCheckCache(): void {
+  checkCacheState.entries.clear();
+}
+
+/**
  * Reset {@link policyStore}, {@link roleCatalog}, {@link permissionCatalog},
- * and {@link auditState} back to their fresh-boot defaults. Test-only
- * convenience so independent test cases sharing this module's singleton
- * state (ordinary ESM module caching within a test file/process) don't leak
- * roles, permissions, assignments, or a previous test's audit sink/sample
- * counter into each other — production code has no reason to call this.
+ * {@link checkCacheState}, and {@link auditState} back to their fresh-boot
+ * defaults. Test-only convenience so independent test cases sharing this
+ * module's singleton state (ordinary ESM module caching within a test
+ * file/process) don't leak roles, permissions, assignments, a previous
+ * test's cached decisions, or a previous test's audit sink/sample counter
+ * into each other — production code has no reason to call this.
  */
 export function resetPolicyStoreForTests(): void {
   policyStore.userRoles.length = 0;
   policyStore.rolePermissions.length = 0;
   roleCatalog.clear();
   permissionCatalog.clear();
+  checkCacheState.entries.clear();
+  checkCacheState.ttlMs = DEFAULT_CHECK_CACHE_TTL_MS;
   auditState.sink = undefined;
   auditState.allowSampleEvery = 1;
   auditState.allowCount = 0;
@@ -177,10 +260,16 @@ function removeInPlace<T>(array: T[], predicate: (item: T) => boolean): void {
  * permissionCatalog} rather than the real `db:query`-backed `store.ts`
  * (feature #34): `check()` itself still reads the same in-memory
  * `policyStore`, so backing `rbac:manage` the same way keeps every
- * management mutation visible to the very next `check()` call with nothing
- * separate to invalidate, and keeps this plugin's manifest exactly as
- * declared today (no new `capabilities.requires`/`depends_on` on
- * `database-mysql`, whose own entry point does not exist yet).
+ * management mutation visible to `can()`'s next fresh read, and keeps this
+ * plugin's manifest exactly as declared today (no new
+ * `capabilities.requires`/`depends_on` on `database-mysql`, whose own
+ * entry point does not exist yet).
+ *
+ * Every operation that actually changes `policyStore`/`roleCatalog`/
+ * `permissionCatalog` also calls {@link invalidateCheckCache} (feature
+ * #35 step 2), so `check()`'s cache never serves a decision a mutation
+ * just invalidated. `getRole`/`listRoles`/`getPermission` are pure reads
+ * and need no invalidation.
  */
 function createInMemoryManagementStore(): RbacManagementStore {
   return {
@@ -199,6 +288,7 @@ function createInMemoryManagementStore(): RbacManagementStore {
         });
       }
       roleCatalog.set(role.id, role);
+      invalidateCheckCache();
     },
 
     async updateRole(id, changes) {
@@ -211,6 +301,7 @@ function createInMemoryManagementStore(): RbacManagementStore {
         "description" in changes ? (changes.description ?? undefined) : existing.description;
       const updated: Role = description === undefined ? { id, name } : { id, name, description };
       roleCatalog.set(id, updated);
+      invalidateCheckCache();
       return updated;
     },
 
@@ -218,6 +309,7 @@ function createInMemoryManagementStore(): RbacManagementStore {
       roleCatalog.delete(id);
       removeInPlace(policyStore.rolePermissions, (grant) => grant.roleId === id);
       removeInPlace(policyStore.userRoles, (assignment) => assignment.roleId === id);
+      invalidateCheckCache();
     },
 
     async getPermission(id) {
@@ -235,6 +327,7 @@ function createInMemoryManagementStore(): RbacManagementStore {
         );
       }
       policyStore.rolePermissions.push({ roleId, permissionId });
+      invalidateCheckCache();
     },
 
     async revokePermissionFromRole(roleId, permissionId) {
@@ -242,6 +335,7 @@ function createInMemoryManagementStore(): RbacManagementStore {
         policyStore.rolePermissions,
         (grant) => grant.roleId === roleId && grant.permissionId === permissionId,
       );
+      invalidateCheckCache();
     },
 
     async assignRoleToUser(userId, roleId) {
@@ -254,6 +348,7 @@ function createInMemoryManagementStore(): RbacManagementStore {
         });
       }
       policyStore.userRoles.push({ userId, roleId });
+      invalidateCheckCache();
     },
 
     async revokeRoleFromUser(userId, roleId) {
@@ -261,6 +356,7 @@ function createInMemoryManagementStore(): RbacManagementStore {
         policyStore.userRoles,
         (assignment) => assignment.userId === userId && assignment.roleId === roleId,
       );
+      invalidateCheckCache();
     },
   };
 }
@@ -330,8 +426,33 @@ function recordCheckDecision(
   });
 }
 
+/**
+ * Deny-by-default policy check, memoized (feature #35): a `(userId,
+ * action, resource)` triple already answered within the last {@link
+ * checkCacheState.ttlMs} milliseconds returns the cached decision instead
+ * of re-walking `policyStore` through `can()`. A cache miss (first time
+ * this triple was asked about, or its entry expired) falls through to
+ * `can()` and populates the cache for next time. Every call — hit or miss
+ * — is still audited via {@link recordCheckDecision}: caching is purely a
+ * `can()`-computation optimization, invisible to the audit trail, which
+ * cares about how many times a decision was *asked for*, not how many
+ * times it was *computed* (see `audit.test.ts`'s allow-sampling tests,
+ * which call `check()` on the same triple repeatedly and expect every call
+ * counted).
+ */
 function check(userId: string, action: string, resource: string): boolean {
-  const allowed = can(policyStore as PolicyStore, userId, action, resource);
+  const key = checkCacheKey(userId, action, resource);
+  const now = Date.now();
+  const cached = checkCacheState.entries.get(key);
+
+  let allowed: boolean;
+  if (cached !== undefined && cached.expiresAt > now) {
+    allowed = cached.allowed;
+  } else {
+    allowed = can(policyStore as PolicyStore, userId, action, resource);
+    checkCacheState.entries.set(key, { allowed, expiresAt: now + checkCacheState.ttlMs });
+  }
+
   recordCheckDecision(userId, action, resource, allowed);
   return allowed;
 }

@@ -62,12 +62,18 @@ describe("rbac:manage — wiring (feature #36)", () => {
     await manage.assignPermissionToRole(ADMIN, "editor", "wiki:edit");
     await manage.assignRoleToUser(ADMIN, "bob", "editor");
 
-    // No caching layer in front of check() yet (feature #35) — the
-    // assignment just made is visible immediately.
+    // The assignment just made is visible immediately, even though check()
+    // now caches decisions (feature #35): this is the first time
+    // ("bob", "edit"/"delete", "wiki") has ever been asked about, so there
+    // is nothing stale to serve.
     const check = (rbacModule.provides?.["rbac:check"] as { check: RbacCheckFn }).check;
     expect(check("bob", "edit", "wiki")).toBe(true);
     expect(check("bob", "delete", "wiki")).toBe(false);
 
+    // The revoke below invalidates check()'s entire decision cache
+    // (feature #35 step 2), so the very next check for the exact same
+    // ("bob", "edit", "wiki") triple already cached `true` above still sees
+    // the revoke, well within the cache's TTL.
     await manage.revokeRoleFromUser(ADMIN, "bob", "editor");
     expect(check("bob", "edit", "wiki")).toBe(false);
   });
