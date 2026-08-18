@@ -5,6 +5,7 @@ import {
   ConfigError,
   DatabaseError,
   MigrationError,
+  NotFoundError,
   PluginLoadError,
   ValidationError,
   isAppError,
@@ -103,6 +104,20 @@ describe("MigrationError", () => {
     );
     expect(error.publicMessage).not.toContain("0001_create_widgets.ts");
     expect(error.publicMessage).not.toContain("abc123");
+    expect(error.publicMessage.length).toBeGreaterThan(0);
+  });
+});
+
+describe("NotFoundError", () => {
+  it("carries a stable machine-readable code and status", () => {
+    const error = new NotFoundError("no route matches GET /widgets/999");
+    expect(error).toBeInstanceOf(AppError);
+    expect(error.code).toBe("NOT_FOUND");
+    expect(error.statusCode).toBe(404);
+  });
+
+  it("has a non-empty default public message", () => {
+    const error = new NotFoundError("no route matches GET /widgets/999");
     expect(error.publicMessage.length).toBeGreaterThan(0);
   });
 });

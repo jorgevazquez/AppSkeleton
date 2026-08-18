@@ -36,6 +36,7 @@
 import Fastify from "fastify";
 import { createLogger } from "../../core/logger.js";
 import type { PluginLifecycleContext } from "../../core/loader.js";
+import { registerErrorHandling } from "./src/error-handler.js";
 import {
   createRouteRegistrar,
   type HttpRouteRegistrationCapability,
@@ -76,6 +77,13 @@ function buildApp(context: PluginLifecycleContext) {
       context: { module: "http" },
     }),
   });
+
+  // Wired before any route is registered (feature #60) so the uniform
+  // {code, message, details} envelope covers /health, every route a
+  // consumer registers via registerRoute() (feature #59), Fastify's own
+  // schema-validation failures, and unmatched routes alike — see
+  // ./src/error-handler.ts's module docs.
+  registerErrorHandling(built);
 
   built.get("/health", async () => ({ status: "ok" }));
 
