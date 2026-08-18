@@ -25,9 +25,15 @@
  * writing plain `.js` files to a temp dir and dynamically `import()`ing
  * them, which is exactly what migrator.ts's `importMigrationModule()` does
  * internally. All fixture-owned migration names start with `9` and all
- * fixture-owned tables are prefixed `migrator_test_` — outside the range
- * any real production migration would use — so `afterAll` can clean up
- * precisely without touching unrelated state in the shared dev database.
+ * fixture-owned tables are prefixed `database_mysql_migrator_test_` —
+ * outside the range any real production migration would use, so `afterAll`
+ * can clean up precisely without touching unrelated state in the shared
+ * dev database — and, since feature #22, a valid prefix under this
+ * plugin's own `database_mysql_` namespace (see migrator.ts's "Per-plugin
+ * table namespace enforcement" section): every `runMigrationsUp`/
+ * `runMigrationsDown` call below passes `{ pluginId: "database-mysql" }`,
+ * so a fixture table outside that namespace would be rejected before ever
+ * reaching MySQL.
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -102,10 +108,10 @@ describe.runIf(mysqlReachable)("migration runner — checksum-verified up/down i
   let db: Kysely<Database>;
   let migrationsDir: string;
 
-  const WIDGETS_MIGRATION = "9001_migrator_test_create_widgets.mjs";
-  const GIZMOS_MIGRATION = "9002_migrator_test_create_gizmos.mjs";
-  const GADGETS_MIGRATION = "9003_migrator_test_create_gadgets.mjs";
-  const SHOULD_NOT_RUN_MIGRATION = "9004_migrator_test_should_not_run.mjs";
+  const WIDGETS_MIGRATION = "9001_database_mysql_migrator_test_create_widgets.mjs";
+  const GIZMOS_MIGRATION = "9002_database_mysql_migrator_test_create_gizmos.mjs";
+  const GADGETS_MIGRATION = "9003_database_mysql_migrator_test_create_gadgets.mjs";
+  const SHOULD_NOT_RUN_MIGRATION = "9004_database_mysql_migrator_test_should_not_run.mjs";
 
   function writeFixtureMigration(name: string, table: string): void {
     writeFileSync(
@@ -138,10 +144,10 @@ describe.runIf(mysqlReachable)("migration runner — checksum-verified up/down i
     // a rejecting state by the checksum-mismatch test below) — drop every
     // fixture-owned table and delete every fixture-owned tracking row.
     for (const table of [
-      "migrator_test_widgets",
-      "migrator_test_gizmos",
-      "migrator_test_gadgets",
-      "migrator_test_should_not_run",
+      "database_mysql_migrator_test_widgets",
+      "database_mysql_migrator_test_gizmos",
+      "database_mysql_migrator_test_gadgets",
+      "database_mysql_migrator_test_should_not_run",
     ]) {
       await pool.query("DROP TABLE IF EXISTS `" + table + "`");
     }
@@ -151,12 +157,12 @@ describe.runIf(mysqlReachable)("migration runner — checksum-verified up/down i
   });
 
   it("applies a pending migration and records it with its checksum in schema_migrations", async () => {
-    writeFixtureMigration(WIDGETS_MIGRATION, "migrator_test_widgets");
+    writeFixtureMigration(WIDGETS_MIGRATION, "database_mysql_migrator_test_widgets");
 
-    const result = await runMigrationsUp(db, files());
+    const result = await runMigrationsUp(db, files(), { pluginId: "database-mysql" });
     expect(result.applied).toEqual([WIDGETS_MIGRATION]);
 
-    expect(await tableExists(pool, "migrator_test_widgets")).toBe(true);
+    expect(await tableExists(pool, "database_mysql_migrator_test_widgets")).toBe(true);
 
     const row = await db
       .selectFrom(MIGRATIONS_TABLE)
@@ -170,38 +176,38 @@ describe.runIf(mysqlReachable)("migration runner — checksum-verified up/down i
 
     // The migrated table is real and usable through Kysely.
     const inserted = await db
-      .insertInto("migrator_test_widgets")
+      .insertInto("database_mysql_migrator_test_widgets")
       .values({ label: "first widget" })
       .executeTakeFirstOrThrow();
     expect(inserted.insertId).toBeGreaterThan(0n);
   });
 
   it("is idempotent — running up again applies nothing new", async () => {
-    const result = await runMigrationsUp(db, files());
+    const result = await runMigrationsUp(db, files(), { pluginId: "database-mysql" });
     expect(result.applied).toEqual([]);
   });
 
   it("applies multiple pending migrations in filename order, not write order", async () => {
     // Written out of numeric order on purpose to prove the runner sorts by
     // filename rather than trusting fixture write order.
-    writeFixtureMigration(GADGETS_MIGRATION, "migrator_test_gadgets");
-    writeFixtureMigration(GIZMOS_MIGRATION, "migrator_test_gizmos");
+    writeFixtureMigration(GADGETS_MIGRATION, "database_mysql_migrator_test_gadgets");
+    writeFixtureMigration(GIZMOS_MIGRATION, "database_mysql_migrator_test_gizmos");
 
-    const result = await runMigrationsUp(db, files());
+    const result = await runMigrationsUp(db, files(), { pluginId: "database-mysql" });
     expect(result.applied).toEqual([GIZMOS_MIGRATION, GADGETS_MIGRATION]);
 
-    expect(await tableExists(pool, "migrator_test_gizmos")).toBe(true);
-    expect(await tableExists(pool, "migrator_test_gadgets")).toBe(true);
+    expect(await tableExists(pool, "database_mysql_migrator_test_gizmos")).toBe(true);
+    expect(await tableExists(pool, "database_mysql_migrator_test_gadgets")).toBe(true);
   });
 
   it("rolls back only the most-recently-applied migration on down()", async () => {
-    const result = await runMigrationsDown(db, files());
+    const result = await runMigrationsDown(db, files(), { pluginId: "database-mysql" });
     expect(result.rolledBack).toEqual([GADGETS_MIGRATION]);
 
-    expect(await tableExists(pool, "migrator_test_gadgets")).toBe(false);
+    expect(await tableExists(pool, "database_mysql_migrator_test_gadgets")).toBe(false);
     // Everything applied before it is untouched.
-    expect(await tableExists(pool, "migrator_test_gizmos")).toBe(true);
-    expect(await tableExists(pool, "migrator_test_widgets")).toBe(true);
+    expect(await tableExists(pool, "database_mysql_migrator_test_gizmos")).toBe(true);
+    expect(await tableExists(pool, "database_mysql_migrator_test_widgets")).toBe(true);
 
     const stillTracked = await db
       .selectFrom(MIGRATIONS_TABLE)
@@ -240,11 +246,14 @@ describe.runIf(mysqlReachable)("migration runner — checksum-verified up/down i
       );
       // Add a brand-new pending migration — this must NOT run once the
       // checksum guard trips on the older, tampered file.
-      writeFixtureMigration(SHOULD_NOT_RUN_MIGRATION, "migrator_test_should_not_run");
+      writeFixtureMigration(
+        SHOULD_NOT_RUN_MIGRATION,
+        "database_mysql_migrator_test_should_not_run",
+      );
 
       let caught: unknown;
       try {
-        await runMigrationsUp(db, files());
+        await runMigrationsUp(db, files(), { pluginId: "database-mysql" });
       } catch (error) {
         caught = error;
       }
@@ -252,7 +261,7 @@ describe.runIf(mysqlReachable)("migration runner — checksum-verified up/down i
       expect((caught as MigrationError).code).toBe("MIGRATION_ERROR");
 
       // The new migration never ran.
-      expect(await tableExists(pool, "migrator_test_should_not_run")).toBe(false);
+      expect(await tableExists(pool, "database_mysql_migrator_test_should_not_run")).toBe(false);
       const stillPending = await db
         .selectFrom(MIGRATIONS_TABLE)
         .select("name")
@@ -271,7 +280,9 @@ describe.runIf(mysqlReachable)("migration runner — checksum-verified up/down i
     });
 
     it("rejects down() too while a checksum mismatch is unresolved", async () => {
-      await expect(runMigrationsDown(db, files())).rejects.toMatchObject({
+      await expect(
+        runMigrationsDown(db, files(), { pluginId: "database-mysql" }),
+      ).rejects.toMatchObject({
         code: "MIGRATION_ERROR",
       });
     });
@@ -279,13 +290,13 @@ describe.runIf(mysqlReachable)("migration runner — checksum-verified up/down i
     it("accepts up()/down() again once the tampered file is restored", async () => {
       writeFileSync(path.join(migrationsDir, WIDGETS_MIGRATION), savedSource);
 
-      const result = await runMigrationsUp(db, files());
+      const result = await runMigrationsUp(db, files(), { pluginId: "database-mysql" });
       // GADGETS was rolled back (and never reapplied) earlier in this suite,
       // so once the checksum guard clears, it's pending again alongside the
       // newer SHOULD_NOT_RUN migration — both apply now, in filename order.
       expect(result.applied).toEqual([GADGETS_MIGRATION, SHOULD_NOT_RUN_MIGRATION]);
-      expect(await tableExists(pool, "migrator_test_gadgets")).toBe(true);
-      expect(await tableExists(pool, "migrator_test_should_not_run")).toBe(true);
+      expect(await tableExists(pool, "database_mysql_migrator_test_gadgets")).toBe(true);
+      expect(await tableExists(pool, "database_mysql_migrator_test_should_not_run")).toBe(true);
     });
   });
 });
