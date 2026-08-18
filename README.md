@@ -18,6 +18,28 @@ npm run dev                 # start the dev server
 npm test                    # run the test suite
 ```
 
+## Code style
+
+Linting and formatting run automatically on staged files before every
+commit via [husky](https://typicode.github.io/husky/) +
+[lint-staged](https://github.com/lint-staged/lint-staged) — no extra setup
+needed beyond the one-time `npm install`, which installs the git hook via
+the `prepare` script. Staged `.ts` files are auto-fixed with
+`eslint --fix` and formatted with `prettier --write`; other staged files
+(`.js`, `.json`, `.md`, `.yml`/`.yaml`) are formatted with `prettier --write`.
+Fixes are re-staged automatically, so a commit with fixable lint/format
+issues just succeeds with the corrected code. Commits are blocked only if
+eslint reports errors it can't auto-fix.
+
+You can also run these manually:
+
+```bash
+npm run lint          # eslint check
+npm run lint:fix      # eslint --fix
+npm run format        # prettier --write
+npm run format:check  # prettier --check
+```
+
 ## Project state
 
 - `feature_list.json` — the build backlog, source of truth for what's done.

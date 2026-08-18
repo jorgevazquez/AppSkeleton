@@ -48,10 +48,7 @@
       "Implement a zod schema and a validateManifest() function returning typed errors for every violation",
       "Write unit tests covering valid manifests and at least 5 invalid variants (bad semver, missing id, duplicate capability, malformed capability grammar, unknown field)"
     ],
-    "depends_on": [
-      1,
-      2
-    ],
+    "depends_on": [1, 2],
     "passes": true
   },
   {
@@ -64,9 +61,7 @@
       "Skip and log (do not crash on) directories missing a plugin.json",
       "Write unit tests against a temp fixture directory tree with valid, missing-manifest, and malformed-manifest plugins"
     ],
-    "depends_on": [
-      4
-    ],
+    "depends_on": [4],
     "passes": true
   },
   {
@@ -80,9 +75,7 @@
       "Detect and reject circular dependencies with a clear error naming the cycle",
       "Write unit tests: linear chain, diamond dependency, missing dependency, version range mismatch, and a 3-node cycle"
     ],
-    "depends_on": [
-      5
-    ],
+    "depends_on": [5],
     "passes": true
   },
   {
@@ -95,10 +88,7 @@
       "Ensure there is no ambient/global way to reach another plugin's internals outside the broker",
       "Write unit tests: granted capability is usable, undeclared capability request is denied, revoked capability stops working immediately"
     ],
-    "depends_on": [
-      1,
-      2
-    ],
+    "depends_on": [1, 2],
     "passes": true
   },
   {
@@ -111,10 +101,7 @@
       "Support onDisable/onUninstall in reverse dependency order",
       "Write unit tests with fixture plugins asserting hook call order matches the dependency graph"
     ],
-    "depends_on": [
-      6,
-      7
-    ],
+    "depends_on": [6, 7],
     "passes": true
   },
   {
@@ -127,9 +114,7 @@
       "Ensure a throwing subscriber cannot prevent other subscribers of the same event from running",
       "Write unit tests: multiple subscribers, unsubscribe, and isolation from a throwing handler"
     ],
-    "depends_on": [
-      1
-    ],
+    "depends_on": [1],
     "passes": true
   },
   {
@@ -142,9 +127,7 @@
       "Ensure a failed plugin's failure does not prevent independent plugins (no depends_on relationship) from loading",
       "Write unit tests: a plugin that throws in onEnable results in only that plugin (and its dependents) being marked failed"
     ],
-    "depends_on": [
-      8
-    ],
+    "depends_on": [8],
     "passes": true
   },
   {
@@ -157,10 +140,7 @@
       "Wire the capability broker to record every grant/deny decision to the audit sink",
       "Write unit tests asserting grants, denials, and revocations all produce audit entries with actor/target/outcome/timestamp"
     ],
-    "depends_on": [
-      3,
-      7
-    ],
+    "depends_on": [3, 7],
     "passes": true
   },
   {
@@ -173,11 +153,7 @@
       "Ensure a fatal config or manifest error produces a clear, single, non-stack-trace startup error message and a non-zero exit code",
       "Run npm run dev and confirm the process boots cleanly with zero plugins present, then again after later plugins exist"
     ],
-    "depends_on": [
-      8,
-      9,
-      10
-    ],
+    "depends_on": [8, 9, 10],
     "passes": true
   },
   {
@@ -190,9 +166,7 @@
       "Write a small CLI script (or npm script) that prints this report in human-readable form",
       "Write unit tests asserting the report reflects load failures and disabled plugins accurately"
     ],
-    "depends_on": [
-      12
-    ],
+    "depends_on": [12],
     "passes": true
   },
   {
@@ -205,10 +179,7 @@
       "Include a case with one intentionally broken plugin and assert the rest still load",
       "Run npm test and confirm the whole kernel suite is green"
     ],
-    "depends_on": [
-      8,
-      10
-    ],
+    "depends_on": [8, 10],
     "passes": true
   },
   {
@@ -221,9 +192,7 @@
       "Cross-check the doc against the actual zod schema so they cannot silently drift (a shared constant or generated snippet)",
       "Have at least one existing kernel test assert the documented capability grammar regex matches the validator's actual regex"
     ],
-    "depends_on": [
-      4
-    ],
+    "depends_on": [4],
     "passes": true
   },
   {
@@ -236,10 +205,7 @@
       "Ensure disabling a plugin that others depend on is rejected with a clear error listing the dependents",
       "Write unit tests: disable/re-enable a leaf plugin succeeds; disabling a depended-upon plugin is rejected"
     ],
-    "depends_on": [
-      8,
-      13
-    ],
+    "depends_on": [8, 13],
     "passes": true
   },
   {
@@ -252,10 +218,7 @@
       "Validate the manifest passes the kernel's manifest validator",
       "Write a unit test asserting the plugin is discoverable and its manifest is valid"
     ],
-    "depends_on": [
-      4,
-      6
-    ],
+    "depends_on": [4, 6],
     "passes": true
   },
   {
@@ -268,10 +231,7 @@
       "Fail fast at startup with a clear error if required DB config is missing or malformed",
       "Write unit tests for config validation; write an integration test that connects to the docker-compose MySQL instance"
     ],
-    "depends_on": [
-      17,
-      2
-    ],
+    "depends_on": [17, 2],
     "passes": true
   },
   {
@@ -284,9 +244,7 @@
       "Detect and reject a modified already-applied migration file via checksum mismatch",
       "Implement `npm run migrate` and `npm run migrate:down`; write an integration test applying and rolling back a sample migration"
     ],
-    "depends_on": [
-      18
-    ],
+    "depends_on": [18],
     "passes": true
   },
   {
@@ -299,9 +257,7 @@
       "Ensure there is no code path that accepts raw interpolated SQL strings from capability consumers",
       "Write an integration test performing a parameterized SELECT/INSERT and asserting SQL injection payloads are treated as literal data"
     ],
-    "depends_on": [
-      18
-    ],
+    "depends_on": [18],
     "passes": true
   },
   {
@@ -313,9 +269,7 @@
       "Expose a transaction(fn) capability that commits on success and rolls back on any thrown error",
       "Write an integration test: a transaction with a failing statement midway leaves no partial writes"
     ],
-    "depends_on": [
-      20
-    ],
+    "depends_on": [20],
     "passes": true
   },
   {
@@ -328,9 +282,7 @@
       "Reject a migration that creates a table violating another plugin's namespace",
       "Write a unit test asserting a misnamed table migration is rejected with a clear error"
     ],
-    "depends_on": [
-      19
-    ],
+    "depends_on": [19],
     "passes": true
   },
   {
@@ -343,9 +295,7 @@
       "Return a clear, safe error (not a raw driver exception) to capability consumers when the pool is exhausted",
       "Write a test simulating a temporarily unreachable DB and asserting the retry/backoff behavior"
     ],
-    "depends_on": [
-      18
-    ],
+    "depends_on": [18],
     "passes": true
   },
   {
@@ -358,10 +308,7 @@
       "Wire it into the kernel introspection report from feature 13 as a per-plugin health field",
       "Write a test asserting introspection reports 'unhealthy' when the DB is unreachable"
     ],
-    "depends_on": [
-      20,
-      13
-    ],
+    "depends_on": [20, 13],
     "passes": true
   },
   {
@@ -374,9 +321,7 @@
       "Wire it into init.sh behind an explicit flag so production runs never seed automatically",
       "Write a test asserting seeds are idempotent (running twice does not duplicate rows)"
     ],
-    "depends_on": [
-      19
-    ],
+    "depends_on": [19],
     "passes": false
   },
   {
@@ -389,9 +334,7 @@
       "Track basic counters (query count, error count, average duration) queryable via kernel introspection",
       "Write a test asserting a deliberately slow query is logged and counted"
     ],
-    "depends_on": [
-      20
-    ],
+    "depends_on": [20],
     "passes": false
   },
   {
@@ -404,11 +347,7 @@
       "Wire this suite to run in CI (depends on the CI pipeline feature) with a MySQL service container",
       "Run npm test locally with docker-compose mysql up and confirm all pass"
     ],
-    "depends_on": [
-      19,
-      20,
-      21
-    ],
+    "depends_on": [19, 20, 21],
     "passes": false
   },
   {
@@ -421,9 +360,7 @@
       "Document usage in docs/backup-restore.md",
       "Write a test (can be a shell-invoking integration test) that backs up and restores a small dataset and asserts row-for-row equality"
     ],
-    "depends_on": [
-      19
-    ],
+    "depends_on": [19],
     "passes": false
   },
   {
@@ -436,11 +373,7 @@
       "Implement a MySQL-backed AuditSink and swap it in during bootstrap once database-mysql has loaded, falling back to in-memory if the DB plugin is disabled",
       "Write an integration test asserting audit events recorded during a session are queryable from the database after restart"
     ],
-    "depends_on": [
-      11,
-      20,
-      22
-    ],
+    "depends_on": [11, 20, 22],
     "passes": false
   },
   {
@@ -453,10 +386,7 @@
       "Surface them through the health-check/introspection integration from feature 24",
       "Write a test asserting metrics update correctly under concurrent queries"
     ],
-    "depends_on": [
-      23,
-      24
-    ],
+    "depends_on": [23, 24],
     "passes": false
   },
   {
@@ -469,10 +399,7 @@
       "Validate the manifest against the kernel's validator",
       "Write a unit test asserting the plugin is discoverable and valid"
     ],
-    "depends_on": [
-      4,
-      6
-    ],
+    "depends_on": [4, 6],
     "passes": true
   },
   {
@@ -485,9 +412,7 @@
       "Implement a permission-string parser/validator enforcing the resource:action grammar from feature 15",
       "Write unit tests for the parser covering valid and invalid permission strings"
     ],
-    "depends_on": [
-      31
-    ],
+    "depends_on": [31],
     "passes": true
   },
   {
@@ -500,9 +425,7 @@
       "Support wildcard permissions (e.g. wiki:* ) with explicit, documented precedence rules",
       "Write unit tests covering allow, deny-by-default, wildcard match, and conflicting-role scenarios"
     ],
-    "depends_on": [
-      32
-    ],
+    "depends_on": [32],
     "passes": true
   },
   {
@@ -515,11 +438,7 @@
       "Reimplement the data access layer to read/write through the db:query capability instead of in-memory structures",
       "Write an integration test: create a role, assign a permission, assign to a user, restart, and confirm state persisted"
     ],
-    "depends_on": [
-      19,
-      20,
-      32
-    ],
+    "depends_on": [19, 20, 32],
     "passes": false
   },
   {
@@ -532,10 +451,7 @@
       "Invalidate affected cache entries immediately on any role/permission/assignment mutation",
       "Write a test proving a permission revoked mid-session is denied on the very next check, not after the TTL"
     ],
-    "depends_on": [
-      33,
-      34
-    ],
+    "depends_on": [33, 34],
     "passes": false
   },
   {
@@ -548,10 +464,7 @@
       "Enforce that only callers already holding rbac:manage may invoke them (self-referential check)",
       "Write unit tests for each operation including failure paths (duplicate role name, assigning a nonexistent permission)"
     ],
-    "depends_on": [
-      33,
-      34
-    ],
+    "depends_on": [33, 34],
     "passes": false
   },
   {
@@ -564,10 +477,7 @@
       "Ensure the seed is idempotent",
       "Write a test asserting seeding twice does not create duplicate roles"
     ],
-    "depends_on": [
-      34,
-      36
-    ],
+    "depends_on": [34, 36],
     "passes": false
   },
   {
@@ -580,10 +490,7 @@
       "Ensure high-frequency checks do not overwhelm the audit sink (batch or sample if needed, documented tradeoff)",
       "Write a test asserting a denied check produces a queryable audit entry"
     ],
-    "depends_on": [
-      11,
-      33
-    ],
+    "depends_on": [11, 33],
     "passes": false
   },
   {
@@ -596,9 +503,7 @@
       "Write a fixture consumer plugin that requests rbac:check and uses it, proving the cross-plugin contract works",
       "Write an integration test for the fixture consumer"
     ],
-    "depends_on": [
-      33
-    ],
+    "depends_on": [33],
     "passes": true
   },
   {
@@ -611,9 +516,7 @@
       "Ensure the bootstrap path is disabled automatically once at least one admin exists",
       "Write a test simulating first-run vs. already-provisioned states"
     ],
-    "depends_on": [
-      37
-    ],
+    "depends_on": [37],
     "passes": false
   },
   {
@@ -626,12 +529,7 @@
       "Run against dockerized MySQL",
       "Run npm test and confirm all pass"
     ],
-    "depends_on": [
-      33,
-      34,
-      35,
-      38
-    ],
+    "depends_on": [33, 34, 35, 38],
     "passes": false
   },
   {
@@ -643,9 +541,7 @@
       "Apply the parser from feature 32 at every boundary that accepts a permission string (seed data, management API, config)",
       "Write unit tests for malformed inputs at each entry point (not just the parser itself)"
     ],
-    "depends_on": [
-      32
-    ],
+    "depends_on": [32],
     "passes": false
   },
   {
@@ -658,9 +554,7 @@
       "Update can() to resolve inherited permissions",
       "Write unit tests for a 2-level hierarchy and a rejected cyclic hierarchy"
     ],
-    "depends_on": [
-      33
-    ],
+    "depends_on": [33],
     "passes": false
   },
   {
@@ -673,10 +567,7 @@
       "Validate request/response payloads with JSON schema",
       "Write an integration test hitting the routes as an admin (allowed) and as a viewer (403 denied)"
     ],
-    "depends_on": [
-      39,
-      59
-    ],
+    "depends_on": [39, 59],
     "passes": false
   },
   {
@@ -689,10 +580,7 @@
       "Validate the manifest",
       "Write a unit test asserting the plugin is discoverable and valid"
     ],
-    "depends_on": [
-      4,
-      6
-    ],
+    "depends_on": [4, 6],
     "passes": true
   },
   {
@@ -705,9 +593,7 @@
       "Compile templates to reusable render functions rather than re-parsing on every render",
       "Write unit tests for variable interpolation, nested conditionals, and loops over arrays/objects"
     ],
-    "depends_on": [
-      45
-    ],
+    "depends_on": [45],
     "passes": true
   },
   {
@@ -720,9 +606,7 @@
       "Default every interpolation to escaped output with no way to accidentally opt out",
       "Write unit tests with adversarial strings (<script>, \" onmouseover=, javascript: URLs) for each context, asserting safe output"
     ],
-    "depends_on": [
-      46
-    ],
+    "depends_on": [46],
     "passes": true
   },
   {
@@ -735,9 +619,7 @@
       "Support nested layouts (a layout extending another layout)",
       "Write unit tests rendering a child template through a 2-level layout chain"
     ],
-    "depends_on": [
-      46
-    ],
+    "depends_on": [46],
     "passes": true
   },
   {
@@ -750,9 +632,7 @@
       "Guard against infinite partial recursion with a max-depth error",
       "Write unit tests for parameterized partials and the recursion guard"
     ],
-    "depends_on": [
-      46
-    ],
+    "depends_on": [46],
     "passes": true
   },
   {
@@ -765,10 +645,7 @@
       "Every use of the raw helper logs an audit entry (plugin id, template, expression) via the kernel audit trail",
       "Write a test asserting raw output is unescaped and produces an audit entry"
     ],
-    "depends_on": [
-      47,
-      11
-    ],
+    "depends_on": [47, 11],
     "passes": true
   },
   {
@@ -781,9 +658,7 @@
       "Set appropriate Cache-Control/ETag headers on served assets",
       "Write a test asserting a registered asset is served with correct headers and content"
     ],
-    "depends_on": [
-      48
-    ],
+    "depends_on": [48],
     "passes": false
   },
   {
@@ -796,10 +671,7 @@
       "Write a fixture consumer plugin proving the cross-plugin render contract works end-to-end",
       "Write an integration test for the fixture consumer"
     ],
-    "depends_on": [
-      46,
-      47
-    ],
+    "depends_on": [46, 47],
     "passes": true
   },
   {
@@ -812,9 +684,7 @@
       "In development, detect source file changes and recompile; in production, cache is immutable per process lifetime",
       "Write a test asserting a changed template is picked up in dev mode and cached (not recompiled) in production mode"
     ],
-    "depends_on": [
-      46
-    ],
+    "depends_on": [46],
     "passes": false
   },
   {
@@ -827,10 +697,7 @@
       "Assert every non-raw context neutralizes every payload",
       "Wire this suite into CI as a required check"
     ],
-    "depends_on": [
-      47,
-      50
-    ],
+    "depends_on": [47, 50],
     "passes": false
   },
   {
@@ -843,9 +710,7 @@
       "Ensure the 500 template only shows internal detail when NODE_ENV=development",
       "Write a test asserting production mode hides error detail and development mode shows it"
     ],
-    "depends_on": [
-      48
-    ],
+    "depends_on": [48],
     "passes": false
   },
   {
@@ -857,12 +722,7 @@
       "Assemble tests covering the parser, layout nesting, partials, and the template cache together",
       "Run npm test and confirm all pass"
     ],
-    "depends_on": [
-      46,
-      48,
-      49,
-      53
-    ],
+    "depends_on": [46, 48, 49, 53],
     "passes": false
   },
   {
@@ -875,10 +735,7 @@
       "Validate the manifest",
       "Write a unit test asserting the plugin is discoverable and valid"
     ],
-    "depends_on": [
-      4,
-      6
-    ],
+    "depends_on": [4, 6],
     "passes": true
   },
   {
@@ -891,10 +748,7 @@
       "Kernel bootstrap starts listening only after all plugins have loaded successfully",
       "Update the smoke test to go through the real bootstrap path and confirm /health still responds"
     ],
-    "depends_on": [
-      57,
-      12
-    ],
+    "depends_on": [57, 12],
     "passes": true
   },
   {
@@ -907,9 +761,7 @@
       "Enforce that every registered route declares a request/response JSON schema",
       "Write an integration test where a fixture plugin registers a route and it is reachable over HTTP"
     ],
-    "depends_on": [
-      58
-    ],
+    "depends_on": [58],
     "passes": true
   },
   {
@@ -921,9 +773,7 @@
       "Wire Fastify's schema validation to reject invalid requests with a uniform JSON error shape ({code, message, details})",
       "Write an integration test posting an invalid payload and asserting the exact error envelope shape"
     ],
-    "depends_on": [
-      59
-    ],
+    "depends_on": [59],
     "passes": true
   },
   {
@@ -936,10 +786,7 @@
       "Ensure unexpected errors return a generic 500 body in production but full detail in development logs",
       "Write a test asserting a thrown internal error never appears in the HTTP response body in production mode"
     ],
-    "depends_on": [
-      58,
-      10
-    ],
+    "depends_on": [58, 10],
     "passes": true
   },
   {
@@ -952,9 +799,7 @@
       "Document the versioning/deprecation policy in docs/api-versioning.md",
       "Write a test asserting a registered route is reachable at the versioned path"
     ],
-    "depends_on": [
-      59
-    ],
+    "depends_on": [59],
     "passes": true
   },
   {
@@ -967,9 +812,7 @@
       "Implement a signed session identifier issuance/verification helper",
       "Write a test asserting a session cookie is issued with the correct flags and a tampered cookie is rejected"
     ],
-    "depends_on": [
-      58
-    ],
+    "depends_on": [58],
     "passes": true
   },
   {
@@ -982,9 +825,7 @@
       "Provide an explicit, audited opt-out for routes that are safe by construction (e.g. pure JSON APIs with strict CORS + no cookies)",
       "Write a test asserting a state-changing request without a valid CSRF token is rejected"
     ],
-    "depends_on": [
-      63
-    ],
+    "depends_on": [63],
     "passes": false
   },
   {
@@ -997,10 +838,7 @@
       "Return 401 for unauthenticated and 403 for authenticated-but-unauthorized, without leaking which one more than necessary",
       "Write an integration test for allowed, unauthenticated, and forbidden cases on a protected fixture route"
     ],
-    "depends_on": [
-      59,
-      39
-    ],
+    "depends_on": [59, 39],
     "passes": false
   },
   {
@@ -1013,9 +851,7 @@
       "Return a standard 429 with Retry-After on limit exceeded",
       "Write a test that exceeds the limit and asserts a 429 response"
     ],
-    "depends_on": [
-      58
-    ],
+    "depends_on": [58],
     "passes": false
   },
   {
@@ -1027,9 +863,7 @@
       "Wire @fastify/helmet with a sensible default policy, configurable per-deployment",
       "Write a test asserting the expected security headers are present on responses"
     ],
-    "depends_on": [
-      58
-    ],
+    "depends_on": [58],
     "passes": false
   },
   {
@@ -1041,9 +875,7 @@
       "Wire @fastify/cors driven by the CORS_ORIGIN env config, denying by default for unlisted origins",
       "Write a test asserting an allowed origin gets CORS headers and a disallowed origin does not"
     ],
-    "depends_on": [
-      58
-    ],
+    "depends_on": [58],
     "passes": false
   },
   {
@@ -1056,9 +888,7 @@
       "Provide a helper that turns parsed params into kysely query modifiers",
       "Write a test for a fixture list route covering default, custom page size, and out-of-range page requests"
     ],
-    "depends_on": [
-      59
-    ],
+    "depends_on": [59],
     "passes": false
   },
   {
@@ -1071,10 +901,7 @@
       "Add a minimal Swagger UI (or equivalent) route for human browsing",
       "Write a test asserting the generated document includes a route registered by a fixture plugin"
     ],
-    "depends_on": [
-      59,
-      62
-    ],
+    "depends_on": [59, 62],
     "passes": false
   },
   {
@@ -1086,9 +913,7 @@
       "Configure Fastify body size limits and request timeouts from env config",
       "Write a test asserting an oversized payload is rejected before reaching the handler"
     ],
-    "depends_on": [
-      58
-    ],
+    "depends_on": [58],
     "passes": false
   },
   {
@@ -1100,13 +925,7 @@
       "Assemble an end-to-end suite exercising the gateway as a whole against fixture routes",
       "Run npm test and confirm all pass"
     ],
-    "depends_on": [
-      60,
-      61,
-      64,
-      65,
-      66
-    ],
+    "depends_on": [60, 61, 64, 65, 66],
     "passes": false
   },
   {
@@ -1119,9 +938,7 @@
       "Validate the manifest",
       "Write a unit test asserting the plugin is discoverable and valid"
     ],
-    "depends_on": [
-      15
-    ],
+    "depends_on": [15],
     "passes": false
   },
   {
@@ -1134,10 +951,7 @@
       "Keep it generated from the single source of truth (feature 4) rather than hand-duplicated",
       "Write a test asserting the exported schema validates the same fixtures the kernel validator does"
     ],
-    "depends_on": [
-      15,
-      4
-    ],
+    "depends_on": [15, 4],
     "passes": false
   },
   {
@@ -1150,9 +964,7 @@
       "Ensure generated output passes the kernel's manifest validator unmodified",
       "Write a test that generates a plugin into a temp dir and validates every emitted file"
     ],
-    "depends_on": [
-      74
-    ],
+    "depends_on": [74],
     "passes": false
   },
   {
@@ -1165,9 +977,7 @@
       "Wire it to package.json's create-plugin script",
       "Write a test invoking the CLI programmatically (non-interactive flags) and asserting correct output"
     ],
-    "depends_on": [
-      75
-    ],
+    "depends_on": [75],
     "passes": false
   },
   {
@@ -1180,9 +990,7 @@
       "Run it against every shipped plugin as part of the test suite so drift is caught automatically",
       "Write unit tests with a passing fixture and 3 failing fixtures (bad naming, undeclared capability use, forbidden import)"
     ],
-    "depends_on": [
-      74
-    ],
+    "depends_on": [74],
     "passes": false
   },
   {
@@ -1195,13 +1003,7 @@
       "Include a worked example referencing the real rbac and database-mysql plugins as canonical patterns",
       "Have a teammate/agent unfamiliar with the codebase attempt to follow only this doc to generate a trivial plugin, and record any ambiguity found as a doc fix"
     ],
-    "depends_on": [
-      15,
-      17,
-      31,
-      45,
-      57
-    ],
+    "depends_on": [15, 17, 31, 45, 57],
     "passes": false
   },
   {
@@ -1214,10 +1016,7 @@
       "Confirm it loads successfully at kernel bootstrap and appears in kernel introspection",
       "Write an integration test asserting hello-world loads without modification after regeneration"
     ],
-    "depends_on": [
-      75,
-      12
-    ],
+    "depends_on": [75, 12],
     "passes": false
   },
   {
@@ -1229,9 +1028,7 @@
       "Expose the generator as an importable function with a typed options object, independent of any CLI/stdin interaction",
       "Write a test invoking the programmatic API directly, bypassing the CLI"
     ],
-    "depends_on": [
-      75
-    ],
+    "depends_on": [75],
     "passes": false
   },
   {
@@ -1243,9 +1040,7 @@
       "Extend the linter to warn when a plugin declares capabilities.requires for a capability no loaded plugin provides",
       "Write a test asserting the warning fires for an intentionally mismatched fixture"
     ],
-    "depends_on": [
-      77
-    ],
+    "depends_on": [77],
     "passes": false
   },
   {
@@ -1258,13 +1053,7 @@
       "Wire it to run in CI and fail if the checked-in doc is stale (regenerate and diff)",
       "Write a test asserting the generated table includes every shipped plugin's declared capabilities"
     ],
-    "depends_on": [
-      74,
-      17,
-      31,
-      45,
-      57
-    ],
+    "depends_on": [74, 17, 31, 45, 57],
     "passes": false
   },
   {
@@ -1276,10 +1065,7 @@
       "Assert generated plugin output passes both the manifest validator and the conventions linter automatically as part of npm test",
       "Cover generation with the minimal option set and with a fuller option set (capabilities, description)"
     ],
-    "depends_on": [
-      75,
-      77
-    ],
+    "depends_on": [75, 77],
     "passes": false
   },
   {
@@ -1291,9 +1077,7 @@
       "Implement a small utility that safely bumps a plugin's semver version in plugin.json and validates the result",
       "Write a test asserting an invalid target version is rejected and a valid one updates the file correctly"
     ],
-    "depends_on": [
-      74
-    ],
+    "depends_on": [74],
     "passes": false
   },
   {
@@ -1306,10 +1090,7 @@
       "Validate the manifest",
       "Write a unit test asserting the plugin is discoverable and valid"
     ],
-    "depends_on": [
-      4,
-      6
-    ],
+    "depends_on": [4, 6],
     "passes": false
   },
   {
@@ -1322,11 +1103,7 @@
       "Include appropriate indexes (namespace+slug uniqueness, revision lookup by page)",
       "Write an integration test applying the migrations and asserting constraints (unique slug per namespace) are enforced"
     ],
-    "depends_on": [
-      19,
-      22,
-      85
-    ],
+    "depends_on": [19, 22, 85],
     "passes": false
   },
   {
@@ -1339,10 +1116,7 @@
       "Enforce slug format validation and namespace existence on create",
       "Write integration tests for each CRUD operation including not-found and duplicate-slug error paths"
     ],
-    "depends_on": [
-      86,
-      20
-    ],
+    "depends_on": [86, 20],
     "passes": false
   },
   {
@@ -1355,10 +1129,7 @@
       "Ensure the auto-escaping from feature 47 still applies to any user-controlled text inside the rendered output",
       "Write a test rendering a page containing an XSS-style payload in Markdown and asserting it is neutralized"
     ],
-    "depends_on": [
-      87,
-      52
-    ],
+    "depends_on": [87, 52],
     "passes": false
   },
   {
@@ -1371,10 +1142,7 @@
       "Implement an endpoint/function to list revisions for a page in reverse-chronological order",
       "Write a test asserting 3 sequential edits produce 3 retrievable revisions in the correct order"
     ],
-    "depends_on": [
-      86,
-      87
-    ],
+    "depends_on": [86, 87],
     "passes": false
   },
   {
@@ -1387,9 +1155,7 @@
       "Render the diff safely through html-renderer (no raw HTML injection from diffed content)",
       "Write a test asserting additions/deletions are correctly identified for a known before/after pair"
     ],
-    "depends_on": [
-      89
-    ],
+    "depends_on": [89],
     "passes": false
   },
   {
@@ -1401,9 +1167,7 @@
       "Implement a query building a nested tree structure from wiki_namespaces and page slugs",
       "Write a test asserting a 3-level namespace hierarchy produces the correct nested structure"
     ],
-    "depends_on": [
-      87
-    ],
+    "depends_on": [87],
     "passes": false
   },
   {
@@ -1416,9 +1180,7 @@
       "Rank results by relevance and return snippets with the matched term highlighted (safely escaped)",
       "Write a test asserting a search term matches the expected pages and irrelevant pages are excluded"
     ],
-    "depends_on": [
-      86
-    ],
+    "depends_on": [86],
     "passes": false
   },
   {
@@ -1431,10 +1193,7 @@
       "Default to viewer-readable/editor-writable unless a namespace overrides it",
       "Write integration tests for allowed and denied access at each permission level"
     ],
-    "depends_on": [
-      87,
-      39
-    ],
+    "depends_on": [87, 39],
     "passes": false
   },
   {
@@ -1447,11 +1206,7 @@
       "Apply the API versioning convention from feature 62",
       "Write an integration test suite hitting every route over real HTTP against a test server instance"
     ],
-    "depends_on": [
-      59,
-      87,
-      88
-    ],
+    "depends_on": [59, 87, 88],
     "passes": false
   },
   {
@@ -1464,10 +1219,7 @@
       "Wire the navigation sidebar from feature 91 into the shared layout",
       "Write a test rendering the home page and asserting key navigation elements are present"
     ],
-    "depends_on": [
-      91,
-      52
-    ],
+    "depends_on": [91, 52],
     "passes": false
   },
   {
@@ -1480,10 +1232,7 @@
       "Show validation errors returned by the API inline in the form",
       "Write a test asserting a submission without a valid CSRF token is rejected end-to-end through the real UI flow"
     ],
-    "depends_on": [
-      94,
-      64
-    ],
+    "depends_on": [94, 64],
     "passes": false
   },
   {
@@ -1496,10 +1245,7 @@
       "Serve attachments through an authorization-checked route (respecting the page's permissions), never directly from a static directory",
       "Write a test asserting an oversized or disallowed-type upload is rejected, and a valid upload is retrievable only by an authorized user"
     ],
-    "depends_on": [
-      87,
-      71
-    ],
+    "depends_on": [87, 71],
     "passes": false
   },
   {
@@ -1512,10 +1258,7 @@
       "Provide a simple admin view/query listing recent wiki audit entries",
       "Write a test asserting an edit produces a queryable audit entry with the correct actor"
     ],
-    "depends_on": [
-      11,
-      87
-    ],
+    "depends_on": [11, 87],
     "passes": false
   },
   {
@@ -1528,9 +1271,7 @@
       "Ensure the seed is idempotent",
       "Write a test asserting seeding twice does not duplicate the Home page"
     ],
-    "depends_on": [
-      87
-    ],
+    "depends_on": [87],
     "passes": false
   },
   {
@@ -1542,10 +1283,7 @@
       "Assemble a suite driving the real HTTP API (and, where practical, the rendered HTML) through a full page lifecycle including a permission-denied case",
       "Run npm test and confirm all pass"
     ],
-    "depends_on": [
-      94,
-      93
-    ],
+    "depends_on": [94, 93],
     "passes": false
   },
   {
@@ -1558,10 +1296,7 @@
       "Invalidate (or simply let the key change) immediately on any edit",
       "Write a test asserting a stale cached render is never served after an edit"
     ],
-    "depends_on": [
-      88,
-      95
-    ],
+    "depends_on": [88, 95],
     "passes": false
   },
   {
@@ -1574,10 +1309,7 @@
       "Fix identified issues (heading order, alt text on any images, focus states)",
       "Write a lightweight automated check (e.g. axe-core against rendered HTML) as part of the test suite"
     ],
-    "depends_on": [
-      95,
-      96
-    ],
+    "depends_on": [95, 96],
     "passes": false
   },
   {
@@ -1603,9 +1335,7 @@
       "Document the remediation process for a flagged vulnerability in docs/security.md",
       "Confirm the step fails the build on a high/critical finding by testing against a known-vulnerable fixture package.json in a scratch branch"
     ],
-    "depends_on": [
-      103
-    ],
+    "depends_on": [103],
     "passes": false
   },
   {
@@ -1619,7 +1349,7 @@
       "Confirm a deliberately malformatted staged file gets auto-fixed on commit"
     ],
     "depends_on": [],
-    "passes": false
+    "passes": true
   },
   {
     "id": 106,
@@ -1630,9 +1360,7 @@
       "Add a gitleaks (or equivalent) step to the CI workflow scanning the diff/history for committed secrets",
       "Confirm it flags a deliberately committed fake secret in a scratch test and is removed before merging"
     ],
-    "depends_on": [
-      103
-    ],
+    "depends_on": [103],
     "passes": false
   },
   {
@@ -1645,10 +1373,7 @@
       "Confirm the image builds and the container serves /health correctly",
       "Document image build/run instructions in README"
     ],
-    "depends_on": [
-      12,
-      58
-    ],
+    "depends_on": [12, 58],
     "passes": false
   },
   {
@@ -1661,10 +1386,7 @@
       "Return the request ID in an X-Request-Id response header for client-side correlation",
       "Write a test asserting the same request ID appears in both the response header and the corresponding log entries"
     ],
-    "depends_on": [
-      58,
-      3
-    ],
+    "depends_on": [58, 3],
     "passes": false
   },
   {
@@ -1677,9 +1399,7 @@
       "Write docs/rate-limiting.md explaining the defaults and how operators should adjust them",
       "Add a test asserting the documented defaults match the actual configured values (no drift)"
     ],
-    "depends_on": [
-      66
-    ],
+    "depends_on": [66],
     "passes": false
   },
   {
@@ -1692,9 +1412,7 @@
       "Run it against a local instance and record baseline throughput/latency numbers in docs/performance-baseline.md",
       "Re-run after any major kernel/plugin change and note regressions"
     ],
-    "depends_on": [
-      94
-    ],
+    "depends_on": [94],
     "passes": false
   },
   {
@@ -1707,10 +1425,7 @@
       "Set a hard shutdown timeout so the process cannot hang indefinitely",
       "Write a test (can be a script-driven integration test) sending SIGTERM and asserting clean exit within the timeout"
     ],
-    "depends_on": [
-      12,
-      18
-    ],
+    "depends_on": [12, 18],
     "passes": false
   },
   {
@@ -1723,11 +1438,7 @@
       "File and fix any concrete issues found as follow-up commits before marking this feature passing",
       "Re-run the full test suite after fixes to confirm no regressions"
     ],
-    "depends_on": [
-      100,
-      72,
-      41
-    ],
+    "depends_on": [100, 72, 41],
     "passes": false
   },
   {
@@ -1739,9 +1450,7 @@
       "Write docs/disaster-recovery.md covering backup schedule expectations, restore procedure (referencing feature 28's scripts), and a recovery-time checklist",
       "Perform a dry-run restore into a scratch database and record the steps that actually worked"
     ],
-    "depends_on": [
-      28
-    ],
+    "depends_on": [28],
     "passes": false
   },
   {
@@ -1754,10 +1463,7 @@
       "Cross-link it from README",
       "Have it reviewed against the actual current behavior of the kernel (no aspirational/inaccurate claims)"
     ],
-    "depends_on": [
-      78,
-      2
-    ],
+    "depends_on": [78, 2],
     "passes": false
   },
   {
@@ -1782,10 +1488,7 @@
       "Preserve JSON error envelopes for API/XHR requests based on Accept header",
       "Write a test asserting an unknown route returns the styled 404 page for a browser-like request and a JSON envelope for an API request"
     ],
-    "depends_on": [
-      55,
-      61
-    ],
+    "depends_on": [55, 61],
     "passes": false
   },
   {
@@ -1797,10 +1500,7 @@
       "Ensure any config validation failure during bootstrap prints a single clear message identifying the offending variable(s) and exits non-zero, with no partial/half-started server",
       "Write a test that boots with an intentionally invalid config and asserts the process exits before binding a port"
     ],
-    "depends_on": [
-      2,
-      12
-    ],
+    "depends_on": [2, 12],
     "passes": true
   },
   {
@@ -1813,10 +1513,7 @@
       "Report any plugin using more than it declared (should be impossible by construction) or declaring more than it uses (over-privileged)",
       "Run it against the full shipped plugin set and resolve any findings"
     ],
-    "depends_on": [
-      7,
-      77
-    ],
+    "depends_on": [7, 77],
     "passes": false
   },
   {
@@ -1829,9 +1526,7 @@
       "Record baseline numbers in docs/performance-baseline.md alongside the load test results from feature 110",
       "Flag in the doc what overhead budget future plugins should stay within"
     ],
-    "depends_on": [
-      12
-    ],
+    "depends_on": [12],
     "passes": false
   },
   {
@@ -1844,11 +1539,7 @@
       "Confirm every shipped plugin (rbac, database-mysql, html-renderer, api-gateway, plugin-builder, wiki) reports healthy in kernel introspection",
       "Document this exact sequence as the canonical verification procedure in README"
     ],
-    "depends_on": [
-      94,
-      100,
-      103
-    ],
+    "depends_on": [94, 100, 103],
     "passes": false
   }
 ]
