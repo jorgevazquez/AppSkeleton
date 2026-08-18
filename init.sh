@@ -5,6 +5,18 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 echo "== AppSkeleton init =="
 
+# Dev-only seed data (feature #25) is opt-in via an explicit --seed flag —
+# never run automatically, so a production invocation of this script (which
+# should never pass --seed in the first place) never seeds. The seed
+# runner itself (src/core/seed.ts) also independently refuses to run when
+# NODE_ENV=production, as a second, redundant guard.
+SEED_LOCAL_DATA=false
+for arg in "$@"; do
+  case "$arg" in
+    --seed) SEED_LOCAL_DATA=true ;;
+  esac
+done
+
 # 1. Env file
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -48,6 +60,20 @@ if [ -f src/plugins/database-mysql/src/migrate.ts ]; then
   npm run migrate || echo "-> WARNING: migrations failed, continuing (fix before marking DB features passing)."
 else
   echo "-> Migration runner not implemented yet — skipping."
+fi
+
+# 4b. Seed local dev fixtures (feature #25) — dev-only, opt-in via --seed.
+#     Never run without the flag, so a plain `./init.sh` (including any
+#     production bootstrap) never seeds automatically.
+if [ "$SEED_LOCAL_DATA" = true ]; then
+  if [ -f src/cli/seed.ts ]; then
+    echo "-> Seeding local dev fixtures (--seed passed)..."
+    npm run seed || echo "-> WARNING: seeding failed, continuing."
+  else
+    echo "-> Seed runner not implemented yet — skipping despite --seed."
+  fi
+else
+  echo "-> Skipping dev seed data (pass --seed to populate local fixtures)."
 fi
 
 # 5. Verify the toolchain builds & tests run.
