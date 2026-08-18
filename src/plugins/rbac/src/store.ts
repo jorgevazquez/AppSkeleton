@@ -49,10 +49,34 @@
  * "assign a nonexistent permission" validation, an `rbac:manage`
  * authorization gate) are feature #36's job, not this one's — this layer
  * is intentionally a thin, unopinionated CRUD surface over the four tables.
+ *
+ * ## Permission-grammar validation (feature #42)
+ *
+ * This module is one of the boundaries feature #42 ("Permission grammar
+ * validator rejects malformed resource:action strings at every entry
+ * point") requires to apply `permission.ts`'s `parsePermissionString`
+ * parser: every method here that accepts a caller-supplied permission
+ * identifier — {@link RbacStore.createPermission}'s `permission.id`,
+ * {@link RbacStore.getPermission}'s `id`, and {@link
+ * RbacStore.assignPermissionToRole}'s `permissionId` — validates it
+ * against the `resource:action` grammar via {@link assertValidPermissionId}
+ * before it ever reaches a query, and throws the same {@link
+ * ValidationError} `parsePermissionString` itself produces on rejection.
+ * `createPermission` also re-derives `resource`/`action` from the
+ * validated id rather than trusting the caller-supplied fields, so a
+ * hand-built `Permission` literal (this interface's doc comment already
+ * warns callers to prefer {@link toPermission} instead) can never persist
+ * with an `id` that disagrees with its own `resource`/`action` — the same
+ * invariant `toPermission` itself guarantees, just enforced again here so
+ * this layer never trusts an already-parsed-looking object it didn't
+ * parse itself. This is deliberately independent of feature #36's
+ * still-not-built authorization/duplicate-name checks (see above): grammar
+ * validity is a syntactic property of the string itself, checkable with no
+ * database access and no `rbac:manage` grant required.
  */
 import type { Kysely } from "kysely";
 import type { Database } from "./db.js";
-import type { PermissionString } from "./permission.js";
+import { parsePermissionString, type PermissionString } from "./permission.js";
 import type { PolicyStore } from "./policy.js";
 import type { Permission, Role, RolePermission, UserRole } from "./types.js";
 
@@ -110,17 +134,44 @@ function permissionFromRow(row: PermissionRow): Permission {
     : { id: row.id, resource: row.resource, action: row.action, description: row.description };
 }
 
+/**
+ * Validate `id` against the `resource:action` grammar (feature #32's
+ * parser) and return its parsed `{ resource, action }` segments. Throws
+ * the {@link ValidationError} `parsePermissionString` itself produces —
+ * unchanged, with `error.details.input` still carrying the offending
+ * value — on any grammar violation (not a string, empty, wrong shape,
+ * extra/missing colon, uppercase, leading/trailing/double hyphens, etc.).
+ * The one boundary-layer helper every permission-accepting {@link
+ * RbacStore} method below routes through (feature #42).
+ */
+function assertValidPermissionId(id: unknown): { resource: string; action: string } {
+  const parsed = parsePermissionString(id);
+  if (!parsed.ok) {
+    throw parsed.error;
+  }
+  return parsed.value;
+}
+
 /** The typed CRUD surface {@link createRbacStore} returns. */
 export interface RbacStore {
   /** Persist a new role. Throws (via the `db:query` capability's own `DatabaseError` normalization) on a duplicate `id`. */
   createRole(role: Role): Promise<void>;
   getRole(id: string): Promise<Role | undefined>;
   listRoles(): Promise<Role[]>;
-  /** Persist a new permission. Throws on a duplicate `id`. */
+  /**
+   * Persist a new permission. Throws a {@link ValidationError} (feature #42)
+   * if `permission.id` does not follow the `resource:action` grammar;
+   * throws on a duplicate `id` otherwise.
+   */
   createPermission(permission: Permission): Promise<void>;
+  /** Throws a {@link ValidationError} (feature #42) if `id` does not follow the `resource:action` grammar. */
   getPermission(id: PermissionString): Promise<Permission | undefined>;
   listPermissions(): Promise<Permission[]>;
-  /** Grant `permissionId` to `roleId`. Throws on a duplicate `(roleId, permissionId)` pair. */
+  /**
+   * Grant `permissionId` to `roleId`. Throws a {@link ValidationError}
+   * (feature #42) if `permissionId` does not follow the `resource:action`
+   * grammar; throws on a duplicate `(roleId, permissionId)` pair otherwise.
+   */
   assignPermissionToRole(roleId: string, permissionId: PermissionString): Promise<void>;
   listRolePermissions(): Promise<RolePermission[]>;
   /** Assign `roleId` to `userId`. Throws on a duplicate `(userId, roleId)` pair. */
@@ -193,13 +244,17 @@ export function createRbacStore(dbQuery: RbacDbQueryCapability): RbacStore {
     listRoles,
 
     async createPermission(permission) {
+      // Re-derive resource/action from the validated id rather than
+      // trusting the caller-supplied fields — see this module's doc
+      // comment ("Permission-grammar validation (feature #42)") for why.
+      const { resource, action } = assertValidPermissionId(permission.id);
       await dbQuery.query((db) =>
         db
           .insertInto(PERMISSIONS_TABLE)
           .values({
             id: permission.id,
-            resource: permission.resource,
-            action: permission.action,
+            resource,
+            action,
             description: permission.description ?? null,
           })
           .execute(),
@@ -207,6 +262,7 @@ export function createRbacStore(dbQuery: RbacDbQueryCapability): RbacStore {
     },
 
     async getPermission(id) {
+      assertValidPermissionId(id);
       const row = await dbQuery.query((db) =>
         db.selectFrom(PERMISSIONS_TABLE).selectAll().where("id", "=", id).executeTakeFirst(),
       );
@@ -216,6 +272,7 @@ export function createRbacStore(dbQuery: RbacDbQueryCapability): RbacStore {
     listPermissions,
 
     async assignPermissionToRole(roleId, permissionId) {
+      assertValidPermissionId(permissionId);
       await dbQuery.query((db) =>
         db
           .insertInto(ROLE_PERMISSIONS_TABLE)
