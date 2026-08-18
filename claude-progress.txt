@@ -852,3 +852,28 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - AuditSink is threaded directly into the template compiler as a plain constructor-style dependency (RawOutputAuditContext), not via the capability broker — this matches feature #11's own precedent (broker.ts takes an optional auditSink directly, not through a capability grant) and keeps html-renderer's plugin.json capabilities unchanged (still provides render:template / requires nothing).
 - templateName in RawOutputAuditContext is caller-supplied and opaque to this module — template.ts only ever sees raw source strings, no notion of its own name/identity/registry key, so whatever plugin wires up compileTemplate (e.g. wiki, once it exists) should pass whatever it uses to identify the template (file path, registry key, etc).
 - Next natural consumer: any future plugin that renders user- or admin-authored HTML fragments verbatim (e.g. a wiki "raw HTML block" feature) should compile through compileTemplate/compileWithLayout/compileWithPartials with a real audit context (the kernel's shared audit sink, that plugin's id, and a template name) rather than constructing its own ad hoc escape-bypass — this feature's whole point is that html-renderer has no other unescaped-output path.
+
+---
+
+## 2026-08-17 18:46 — Feature #52: Expose render:template as a consumable capability
+
+### What was done:
+- Added src/plugins/html-renderer/index.ts, the plugin's lifecycle module: registers compileTemplate (feature #46/#47) as the render:template capability declared in plugin.json.
+- Exposes RenderTemplateCapability with two functions: compile(source, options?) (compile-once/render-many, wraps compileTemplate directly) and render(source, context?, options?) (compile-and-render-once convenience). Both return the existing Result<_, ValidationError> shape — no thrown exceptions.
+- No lifecycle hooks needed (like rbac's rbac:check) since compileTemplate is a pure function from module-import time; provides is declared at module scope per the loader's declare-before-hooks ordering.
+- Only wires in what feature #52 depends on (features #46/#47 — variables/conditionals/loops + auto-escaping); compileWithLayout/compileWithPartials (#48/#49) are intentionally NOT part of this capability surface yet.
+- Added tests/plugins/html-renderer/render-capability.integration.test.ts: a fixture consumer plugin (page-plugin) that declares render:template under capabilities.requires, obtains it via the real broker/loader in onEnable, and calls both compile()+.render() and the render() convenience end-to-end.
+
+### Testing:
+- npx vitest run tests/plugins/html-renderer: 8 files / 194 tests pass.
+- Full suite: npx vitest run -> 46 files / 709 tests pass (was 45/706 before this feature; +1 file/+3 tests from the new integration test).
+- npm run lint: clean (eslint . --ext .ts).
+- npm run build: clean (tsc -p tsconfig.json).
+- Verified via tests/core/smoke.test.ts, tests/server/index.test.ts, tests/core/kernel.integration.test.ts that the real kernel bootstrap now loads html-renderer successfully (previously failed with PluginLoadError: 'declares capabilities.provides render:template but its module does not export an implementation for it') — loaded list now includes 'html-renderer' alongside 'api-gateway'.
+- Integration test covers: (1) compile-once/render-many + auto-escaping still holds through the capability, plus the render() one-shot convenience; (2) a malformed template surfaces as a typed Result Err through the capability rather than throwing; (3) a fixture plugin that omits render:template from capabilities.requires fails onEnable in isolation (CapabilityDeniedError with reason 'not_declared'), mirroring rbac:check's equivalent test.
+
+### Notes:
+- Followed rbac/index.ts (feature #39) and api-gateway/index.ts (feature #58/#59) as the two prior 'expose X as a consumable capability' precedents — same declare-provides-at-module-scope shape, same fixture-consumer integration-test pattern (hand-built PluginManifest fixtures, real loadPlugins()/createCapabilityBroker(), not mocks).
+- html-renderer/plugin.json already declared render:template under capabilities.provides (and only that, per manifest.test.ts) — this feature only needed to supply index.ts's implementation, not touch the manifest.
+- database-mysql and rbac's rbac:manage are still unimplemented (expected — later features), so kernel bootstrap logs still show those two failing to load; that's pre-existing, unrelated to this feature, and unchanged by this work.
+- Left compileWithLayout/compileWithPartials/raw-output audit wiring out of the capability surface on purpose — feature #52 only depends on #46/#47, and CompileOptions' audit field is still passed through for callers that want it, so widening the surface later (once a feature explicitly calls for it) won't require a breaking change to RenderTemplateCapability.
