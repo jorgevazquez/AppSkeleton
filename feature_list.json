@@ -1591,7 +1591,7 @@
       "Push a trivial branch/PR (or simulate locally with act, if available) and confirm the workflow definition is syntactically valid"
     ],
     "depends_on": [],
-    "passes": false
+    "passes": true
   },
   {
     "id": 104,
