@@ -40,9 +40,30 @@
  * already an `AppError` (e.g. a consumer's own validation logic run inside
  * `fn`, or an already-normalized error rethrown by a nested capability
  * call) passes through unchanged rather than being double-wrapped.
+ *
+ * ## Connection resilience (feature #23)
+ *
+ * `fn` is retried with exponential backoff (see resilience.ts's
+ * `retryWithBackoff()`) when it fails with a *transient connection* error —
+ * the MySQL server being briefly unreachable, a reset/refused/timed-out
+ * TCP connection — since those failures mean the operation almost
+ * certainly never reached the server at all. A generic driver/query error
+ * (syntax error, constraint violation, deadlock, ...) is never retried,
+ * since the server *did* respond and blindly re-running `fn` could
+ * re-execute a write that already partially applied; see resilience.ts's
+ * module doc comment for the full scope boundary this inherits. If the
+ * failure instead came from the connection pool itself refusing to hand
+ * out a connection because it is at capacity (see resilience.ts's
+ * `isPoolExhaustedError()`), it is not retried — retrying a
+ * capacity problem immediately would only add load — and is instead
+ * normalized into a distinct, clearly-labeled `DatabaseError` (`details:
+ * { reason: "pool_exhausted" }`, a public message naming the condition)
+ * rather than mysql2's raw "Queue limit reached."/"No connections
+ * available." string ever reaching a capability consumer.
  */
 import type { Kysely } from "kysely";
 import { DatabaseError, isAppError } from "../../../core/errors.js";
+import { isPoolExhaustedError, retryWithBackoff, type RetryOptions } from "./resilience.js";
 import type { Database } from "./db.js";
 
 /** The object registered with the capability broker as the `db:query` provider. */
@@ -56,6 +77,12 @@ export interface DbQueryCapability {
   query<T>(fn: (db: Kysely<Database>) => Promise<T>): Promise<T>;
 }
 
+/** Options controlling {@link createDbQueryCapability}'s feature #23 retry-on-transient-connection-error behavior. */
+export interface DbQueryCapabilityOptions {
+  /** Overrides for the mid-session retry/backoff policy. See resilience.ts's `RetryOptions`. */
+  retry?: RetryOptions;
+}
+
 /** Human-readable detail from an unknown thrown value, safe to embed in a `DatabaseError`'s internal `message`. */
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -65,14 +92,24 @@ function describeError(error: unknown): string {
  * Build the `db:query` capability implementation over an already-constructed
  * `Kysely<Database>` instance (see `createKyselyDb()` in db.ts).
  */
-export function createDbQueryCapability(db: Kysely<Database>): DbQueryCapability {
+export function createDbQueryCapability(
+  db: Kysely<Database>,
+  options: DbQueryCapabilityOptions = {},
+): DbQueryCapability {
   return {
     async query<T>(fn: (db: Kysely<Database>) => Promise<T>): Promise<T> {
       try {
-        return await fn(db);
+        return await retryWithBackoff(() => fn(db), options.retry);
       } catch (cause) {
         if (isAppError(cause)) {
           throw cause;
+        }
+        if (isPoolExhaustedError(cause)) {
+          throw new DatabaseError(`db:query pool exhausted: ${describeError(cause)}`, {
+            cause,
+            details: { reason: "pool_exhausted" },
+            publicMessage: "The database is temporarily busy. Please try again shortly.",
+          });
         }
         throw new DatabaseError(`db:query failed: ${describeError(cause)}`, { cause });
       }

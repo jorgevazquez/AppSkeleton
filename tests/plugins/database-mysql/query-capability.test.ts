@@ -86,3 +86,74 @@ describe("createDbQueryCapability — db:query capability object", () => {
     await expect(capability.query(async () => rows)).resolves.toEqual(rows);
   });
 });
+
+describe("createDbQueryCapability — connection resilience (feature #23)", () => {
+  function connectionRefusedError(): Error & { code: string } {
+    const error = new Error("connect ECONNREFUSED 127.0.0.1:3306") as Error & { code: string };
+    error.code = "ECONNREFUSED";
+    return error;
+  }
+
+  it("retries fn with backoff after a transient connection error, then resolves once it recovers", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const capability = createDbQueryCapability(FAKE_DB, { retry: { sleep, jitter: false } });
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts += 1;
+      // Simulates the database being temporarily unreachable mid-session
+      // (e.g. a brief network blip) before it recovers.
+      if (attempts <= 2) {
+        throw connectionRefusedError();
+      }
+      return "rows";
+    });
+
+    await expect(capability.query(fn)).resolves.toBe("rows");
+    expect(fn).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a non-connection driver error (e.g. a query syntax error)", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const capability = createDbQueryCapability(FAKE_DB, { retry: { sleep } });
+    const fn = vi.fn(async () => {
+      throw new Error("ER_PARSE_ERROR: You have an error in your SQL syntax");
+    });
+
+    await expect(capability.query(fn)).rejects.toBeInstanceOf(DatabaseError);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("gives up and returns a DatabaseError (not the raw driver exception) once retries are exhausted", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const capability = createDbQueryCapability(FAKE_DB, { retry: { retries: 2, sleep } });
+    const refused = connectionRefusedError();
+    const fn = vi.fn(async () => {
+      throw refused;
+    });
+
+    const promise = capability.query(fn);
+    await expect(promise).rejects.toBeInstanceOf(DatabaseError);
+    await expect(promise).rejects.not.toBe(refused);
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('normalizes mysql2\'s "Queue limit reached." pool-exhaustion error into a distinct, safe DatabaseError', async () => {
+    const capability = createDbQueryCapability(FAKE_DB);
+    const fn = vi.fn(async () => {
+      throw new Error("Queue limit reached.");
+    });
+
+    const promise = capability.query(fn);
+    await expect(promise).rejects.toBeInstanceOf(DatabaseError);
+    await expect(promise).rejects.toMatchObject({
+      details: { reason: "pool_exhausted" },
+    });
+    const error = (await promise.catch((caught: unknown) => caught)) as DatabaseError;
+    expect(error.publicMessage).not.toContain("Queue limit reached");
+    // Pool exhaustion is a capacity problem, not a transient network blip —
+    // it must never be silently retried.
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+});

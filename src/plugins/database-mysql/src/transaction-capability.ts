@@ -43,9 +43,28 @@
  * rather than being double-wrapped; the transaction still rolls back either
  * way, since Kysely triggers the rollback off of `fn` rejecting at all, not
  * off of what kind of error it rejected with.
+ *
+ * ## Connection resilience (feature #23)
+ *
+ * The whole `db.transaction().execute(fn)` call is retried with exponential
+ * backoff (see resilience.ts's `retryWithBackoff()`) when it fails with a
+ * *transient connection* error. This is safe to retry as a whole — not just
+ * "safe to retry the connection step" — because MySQL transactions are
+ * atomic: if the connection drops at any point before `COMMIT` actually
+ * succeeds, nothing `fn` did against `trx` is visible afterward, so retrying
+ * the entire transaction from scratch can never re-apply a partial write.
+ * A generic driver/query error (constraint violation, deadlock, a business
+ * error `fn` itself threw, ...) is never retried, matching `db:query`'s same
+ * scope boundary (see query-capability.ts's/resilience.ts's doc comments).
+ * A pool-exhaustion failure (see resilience.ts's `isPoolExhaustedError()`)
+ * is likewise not retried and is instead normalized into a distinct,
+ * clearly-labeled `DatabaseError` (`details: { reason: "pool_exhausted" }`)
+ * rather than mysql2's raw driver message ever reaching a capability
+ * consumer.
  */
 import type { Kysely, Transaction } from "kysely";
 import { DatabaseError, isAppError } from "../../../core/errors.js";
+import { isPoolExhaustedError, retryWithBackoff, type RetryOptions } from "./resilience.js";
 import type { Database } from "./db.js";
 
 /** The object registered with the capability broker as the `db:transaction` provider. */
@@ -63,6 +82,12 @@ export interface DbTransactionCapability {
   transaction<T>(fn: (trx: Transaction<Database>) => Promise<T>): Promise<T>;
 }
 
+/** Options controlling {@link createDbTransactionCapability}'s feature #23 retry-on-transient-connection-error behavior. */
+export interface DbTransactionCapabilityOptions {
+  /** Overrides for the mid-session retry/backoff policy. See resilience.ts's `RetryOptions`. */
+  retry?: RetryOptions;
+}
+
 /** Human-readable detail from an unknown thrown value, safe to embed in a `DatabaseError`'s internal `message`. */
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -74,14 +99,24 @@ function describeError(error: unknown): string {
  * in db.ts) — the same shared instance the `db:query` capability is built
  * over (see query-capability.ts).
  */
-export function createDbTransactionCapability(db: Kysely<Database>): DbTransactionCapability {
+export function createDbTransactionCapability(
+  db: Kysely<Database>,
+  options: DbTransactionCapabilityOptions = {},
+): DbTransactionCapability {
   return {
     async transaction<T>(fn: (trx: Transaction<Database>) => Promise<T>): Promise<T> {
       try {
-        return await db.transaction().execute(fn);
+        return await retryWithBackoff(() => db.transaction().execute(fn), options.retry);
       } catch (cause) {
         if (isAppError(cause)) {
           throw cause;
+        }
+        if (isPoolExhaustedError(cause)) {
+          throw new DatabaseError(`db:transaction pool exhausted: ${describeError(cause)}`, {
+            cause,
+            details: { reason: "pool_exhausted" },
+            publicMessage: "The database is temporarily busy. Please try again shortly.",
+          });
         }
         throw new DatabaseError(`db:transaction failed: ${describeError(cause)}`, { cause });
       }

@@ -94,3 +94,60 @@ describe("createDbTransactionCapability — db:transaction capability object", (
     await expect(capability.transaction(async () => rows)).resolves.toEqual(rows);
   });
 });
+
+describe("createDbTransactionCapability — connection resilience (feature #23)", () => {
+  function connectionRefusedError(): Error & { code: string } {
+    const error = new Error("connect ECONNREFUSED 127.0.0.1:3306") as Error & { code: string };
+    error.code = "ECONNREFUSED";
+    return error;
+  }
+
+  it("retries the whole transaction with backoff after a transient connection error, then commits once it recovers", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const capability = createDbTransactionCapability(fakeDb(), { retry: { sleep, jitter: false } });
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts += 1;
+      // Simulates the database connection dropping mid-session (before
+      // COMMIT) twice before it recovers — safe to retry the whole
+      // transaction from scratch since MySQL guarantees nothing partial
+      // was ever committed.
+      if (attempts <= 2) {
+        throw connectionRefusedError();
+      }
+      return "committed";
+    });
+
+    await expect(capability.transaction(fn)).resolves.toBe("committed");
+    expect(fn).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a non-connection error (e.g. a deadlock or a business-rule rejection)", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const capability = createDbTransactionCapability(fakeDb(), { retry: { sleep } });
+    const fn = vi.fn(async () => {
+      throw new Error("ER_LOCK_DEADLOCK: Deadlock found");
+    });
+
+    await expect(capability.transaction(fn)).rejects.toBeInstanceOf(DatabaseError);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('normalizes mysql2\'s "No connections available." pool-exhaustion error into a distinct, safe DatabaseError', async () => {
+    const capability = createDbTransactionCapability(fakeDb());
+    const fn = vi.fn(async () => {
+      throw new Error("No connections available.");
+    });
+
+    const promise = capability.transaction(fn);
+    await expect(promise).rejects.toBeInstanceOf(DatabaseError);
+    await expect(promise).rejects.toMatchObject({
+      details: { reason: "pool_exhausted" },
+    });
+    const error = (await promise.catch((caught: unknown) => caught)) as DatabaseError;
+    expect(error.publicMessage).not.toContain("No connections available");
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+});

@@ -31,6 +31,23 @@
  *                             default); an operator connecting to a
  *                             self-signed server without supplying
  *                             `DB_SSL_CA` must explicitly opt out.
+ *   - `DB_POOL_QUEUE_LIMIT`  — feature #23 ("connection resilience ...
+ *                             pool exhaustion handling"): the maximum
+ *                             number of `getConnection()` callers mysql2's
+ *                             pool will let wait once every pooled
+ *                             connection is checked out, before rejecting
+ *                             further callers with a "pool exhausted"
+ *                             error (see resilience.ts's
+ *                             `isPoolExhaustedError()` and pool.ts's
+ *                             `createDbPool()`) rather than queuing them
+ *                             indefinitely. Optional and unset by default —
+ *                             matching mysql2's own default of `0`
+ *                             (unbounded queue) — so existing deployments
+ *                             that never configure it keep today's
+ *                             behavior; an operator opts into a bounded
+ *                             queue (and therefore an observable
+ *                             exhaustion error instead of ever-growing wait
+ *                             times) by setting it explicitly.
  */
 import { z } from "zod";
 import { loadConfig, type LoadConfigOptions } from "../../../core/config.js";
@@ -55,6 +72,7 @@ export const DbConfigSchema = z.object({
   DB_SSL: z.enum(["disabled", "enabled"]).default("disabled"),
   DB_SSL_CA: z.string().min(1, "must not be empty").optional(),
   DB_SSL_REJECT_UNAUTHORIZED: booleanFromEnv.default(true),
+  DB_POOL_QUEUE_LIMIT: z.coerce.number().int("must be an integer").min(0).optional(),
 });
 
 export type DbConfig = z.infer<typeof DbConfigSchema>;
