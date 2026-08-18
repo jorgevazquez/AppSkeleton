@@ -102,7 +102,7 @@ describe("http:route registerRoute — integration (feature #59, step 3)", () =>
 
     const app = getHttpRoute().getApp();
 
-    const res = await app.inject({ method: "GET", url: "/greet/world" });
+    const res = await app.inject({ method: "GET", url: "/api/v1/greet/world" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ message: "hello, world" });
 
@@ -166,7 +166,7 @@ describe("http:route registerRoute — integration (feature #59, step 3)", () =>
 
     const app = getHttpRoute().getApp();
 
-    const res = await app.inject({ method: "GET", url: "/widgets/not-a-number" });
+    const res = await app.inject({ method: "GET", url: "/api/v1/widgets/not-a-number" });
     expect(res.statusCode).toBe(400);
 
     await apiGatewayModule.onDisable();

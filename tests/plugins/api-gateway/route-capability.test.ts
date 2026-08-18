@@ -117,7 +117,7 @@ describe("createRouteRegistrar — schema enforcement (feature #59, step 2)", ()
       }),
     );
 
-    const res = await app.inject({ method: "GET", url: "/widgets/42" });
+    const res = await app.inject({ method: "GET", url: "/api/v1/widgets/42" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ message: "widget-42" });
 
@@ -143,7 +143,7 @@ describe("createRouteRegistrar — schema enforcement (feature #59, step 2)", ()
       }),
     );
 
-    const res = await app.inject({ method: "GET", url: "/broken" });
+    const res = await app.inject({ method: "GET", url: "/api/v1/broken" });
     // fast-json-stringify silently drops properties not declared in the
     // response schema rather than erroring — so "message" is absent, proving
     // the declared schema (not the handler's raw return value) governs the
