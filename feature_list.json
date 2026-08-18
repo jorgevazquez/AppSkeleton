@@ -322,7 +322,7 @@
       "Write a test asserting seeds are idempotent (running twice does not duplicate rows)"
     ],
     "depends_on": [19],
-    "passes": false
+    "passes": true
   },
   {
     "id": 26,

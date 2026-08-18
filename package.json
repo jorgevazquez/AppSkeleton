@@ -19,6 +19,7 @@
     "test:watch": "vitest",
     "migrate": "tsx src/plugins/database-mysql/src/migrate.ts up",
     "migrate:down": "tsx src/plugins/database-mysql/src/migrate.ts down",
+    "seed": "tsx src/cli/seed.ts",
     "create-plugin": "tsx src/plugins/plugin-builder/src/cli.ts create",
     "introspect": "tsx src/cli/introspect.ts",
     "prepare": "husky"

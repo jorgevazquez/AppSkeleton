@@ -226,6 +226,31 @@ export class RenderError extends AppError {
   }
 }
 
+/**
+ * The dev-only seed/fixtures runner (feature #25 — "Seed data / fixtures
+ * mechanism for local development") refused to run. Two distinct causes
+ * share this error: (1) the production guard tripped — `runSeeds()` was
+ * invoked with `NODE_ENV=production` (see `core/seed.ts`'s
+ * `assertSeedingAllowed()`), the second, independent layer behind
+ * `init.sh`'s explicit `--seed` opt-in flag that keeps a production run
+ * from ever seeding automatically; or (2) a plugin tried to
+ * {@link "./seed.js".registerSeed} a name it had already registered,
+ * catching a copy-paste bug at registration time rather than letting a
+ * seed silently shadow another. Never thrown for a failure *while actually
+ * running* a seed's own `run(db)` function — a driver-level failure there
+ * surfaces as {@link DatabaseError} instead, exactly like migrator.ts's own
+ * split between `MigrationError` (runner-level refusals) and
+ * `DatabaseError` (a migration's SQL itself failing).
+ */
+export class SeedError extends AppError {
+  readonly code = "SEED_ERROR";
+  readonly statusCode = 500;
+
+  protected override defaultPublicMessage(): string {
+    return "A seed data error occurred.";
+  }
+}
+
 /** Narrow an unknown thrown value down to the AppError taxonomy. */
 export function isAppError(error: unknown): error is AppError {
   return error instanceof AppError;
