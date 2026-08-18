@@ -711,7 +711,7 @@
       "Write a test asserting production mode hides error detail and development mode shows it"
     ],
     "depends_on": [48],
-    "passes": false
+    "passes": true
   },
   {
     "id": 56,
