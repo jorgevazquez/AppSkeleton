@@ -969,3 +969,24 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - This feature turned out to be almost entirely already satisfied by earlier features (#2 layered config/ConfigError, #12 kernel bootstrap fatal-error handling, #58 listen-only-after-full-plugin-load) — step 1 of the feature's steps required no source changes, only the missing process-level regression test from step 2.
 - The port-collision technique (occupy the port yourself first, then assert the child's failure message is the config error and not an address-in-use error, and that your own probe still owns the port afterward) is a reusable pattern for proving 'never attempted to bind' rather than the weaker 'port happened to be free after the child exited.'
 - tsx cold-start + exit for this failure path is ~0.2s locally, comfortably inside vitest's default 5000ms test timeout, though the test still passes an explicit 15000ms timeout for safety on slower CI machines.
+
+---
+
+## 2026-08-17 19:13 — Feature #105: Pre-commit hooks for lint and format on staged files
+
+### What was done:
+- Installed husky ^9.1.7 and lint-staged ^17.3.0 as devDependencies; ran `npx husky init` to scaffold .husky/pre-commit and add the `prepare`: `husky` script to package.json (so `npm install` wires up the git hook automatically for any clone).
+- Replaced the default .husky/pre-commit body (npm test) with `npx lint-staged`.
+- Added a `lint-staged` config block to package.json: staged *.ts files run `eslint --fix` then `prettier --write`; staged *.js/*.json/*.md/*.yml/*.yaml run `prettier --write`. Fixed files are automatically re-staged by lint-staged before the commit completes.
+- Documented the workflow in README.md under a new "Code style" section: one-time `npm install" sets up the hook via the prepare script, explains what gets auto-fixed vs. what blocks a commit, and lists the manual lint/format npm scripts.
+
+### Testing:
+- Ran ./init.sh: full suite passes (51 files / 757 tests).
+- Staged a deliberately malformatted .ts scratch file (bad spacing, no semicolons) and ran `git commit`; verified via `git show HEAD:<file>` that eslint --fix + prettier --write auto-corrected it before the commit landed, then reset the throwaway commit/file to keep history clean.
+- Staged a .ts scratch file with a non-autofixable eslint error (unused var) and confirmed the commit was correctly blocked (exit code 1, husky reverted the staged state) — proves the hook fails closed on real lint errors instead of silently letting them through.
+- Verified npm run lint, npm run build, and npm test all pass after the change; confirmed the actual feature commit (git add -A && git commit) exercised the real hook end-to-end, auto-formatting package.json/feature_list.json/README.md/package-lock.json via lint-staged as part of the commit.
+
+### Notes:
+- feature_list.json and a few other pre-existing files (AGENTS.md, docs/api-versioning.md, spec.md, some test files) were not prettier-formatted before this feature; lint-staged only touches staged files, so those remain as-is until someone touches them in a future commit — not fixed proactively here to keep the diff scoped to feature #105.
+- lint-staged's prettier pass reformatted feature_list.json's JSON layout when the completion commit ran (dev-agent.py's writer doesn't match Prettier's JSON style); verified byte-for-byte that the only semantic change was feature #105's passes: false -> true, everything else was pure whitespace/formatting.
+- .husky/_ (husky's internal helper dir) is already covered by its own generated .gitignore (*), so it won't get committed; only .husky/pre-commit is tracked.
