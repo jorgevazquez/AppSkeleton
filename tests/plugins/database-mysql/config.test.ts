@@ -167,6 +167,35 @@ describe("DbConfigSchema / loadDbConfig — optional TLS", () => {
   });
 });
 
+describe("DbConfigSchema / loadDbConfig — optional DB_SLOW_QUERY_THRESHOLD_MS (feature #26)", () => {
+  it("is undefined when unset — the operator-configurable threshold defaults elsewhere (query-metrics.ts)", () => {
+    const config = loadDbConfig({ env: VALID_ENV });
+    expect(config.DB_SLOW_QUERY_THRESHOLD_MS).toBeUndefined();
+  });
+
+  it("coerces a numeric env string to a number", () => {
+    const config = loadDbConfig({ env: { ...VALID_ENV, DB_SLOW_QUERY_THRESHOLD_MS: "500" } });
+    expect(config.DB_SLOW_QUERY_THRESHOLD_MS).toBe(500);
+  });
+
+  it("accepts 0 (log every query)", () => {
+    const config = loadDbConfig({ env: { ...VALID_ENV, DB_SLOW_QUERY_THRESHOLD_MS: "0" } });
+    expect(config.DB_SLOW_QUERY_THRESHOLD_MS).toBe(0);
+  });
+
+  it("rejects a negative threshold", () => {
+    expect(() => loadDbConfig({ env: { ...VALID_ENV, DB_SLOW_QUERY_THRESHOLD_MS: "-1" } })).toThrow(
+      ConfigError,
+    );
+  });
+
+  it("rejects a non-integer threshold", () => {
+    expect(() =>
+      loadDbConfig({ env: { ...VALID_ENV, DB_SLOW_QUERY_THRESHOLD_MS: "12.5" } }),
+    ).toThrow(ConfigError);
+  });
+});
+
 describe("DbConfigSchema — exported for direct reuse", () => {
   it("is a zod object schema whose shape includes every DB_* field", () => {
     expect(Object.keys(DbConfigSchema.shape)).toEqual(
@@ -180,6 +209,7 @@ describe("DbConfigSchema — exported for direct reuse", () => {
         "DB_SSL",
         "DB_SSL_CA",
         "DB_SSL_REJECT_UNAUTHORIZED",
+        "DB_SLOW_QUERY_THRESHOLD_MS",
       ]),
     );
   });

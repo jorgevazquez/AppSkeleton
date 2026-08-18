@@ -1,8 +1,29 @@
-import { Kysely } from "kysely";
+import { Kysely, type LogEvent } from "kysely";
 import { describe, expect, it, vi } from "vitest";
 import { DatabaseError, ValidationError } from "../../../src/core/errors.js";
 import type { Database } from "../../../src/plugins/database-mysql/src/db.js";
 import { createDbQueryCapability } from "../../../src/plugins/database-mysql/src/query-capability.js";
+import { createQueryMetricsRecorder } from "../../../src/plugins/database-mysql/src/query-metrics.js";
+
+/**
+ * A fake Kysely `LogEvent` for pure unit tests — real events are built by
+ * Kysely internals from a full `CompiledQuery` (see
+ * `kysely/dist/query-compiler/compiled-query.d.ts`), which is far more than
+ * `QueryMetricsRecorder.record()`/`createSlowQueryLogger()` actually read
+ * (`sql`, `parameters`, `queryDurationMillis`, `level`, and `error` for the
+ * error case). Cast rather than fully implementing `CompiledQuery`'s
+ * internal `RootOperationNode`/`QueryId` shape, which nothing under test
+ * touches.
+ */
+function fakeLogEvent(options: { durationMs: number; error?: unknown }): LogEvent {
+  const { durationMs, error } = options;
+  return {
+    level: error !== undefined ? "error" : "query",
+    error,
+    query: { sql: "select 1", parameters: [] },
+    queryDurationMillis: durationMs,
+  } as unknown as LogEvent;
+}
 
 /**
  * A fake `Kysely<Database>` for pure unit tests: `createDbQueryCapability()`
@@ -27,13 +48,14 @@ describe("createDbQueryCapability — db:query capability object", () => {
     expect(fn).toHaveBeenCalledWith(FAKE_DB);
   });
 
-  it("exposes only `query` and `healthCheck` — no `query(sql, params)` string-accepting overload", () => {
+  it("exposes only `query`, `healthCheck`, and `getMetrics` — no `query(sql, params)` string-accepting overload", () => {
     const capability = createDbQueryCapability(FAKE_DB);
-    // healthCheck (feature #24) is the one other public member — see this
-    // file's "healthCheck (feature #24)" describe block below. It never
-    // accepts a raw SQL string either (it takes no arguments at all), so it
-    // doesn't reopen the "no raw interpolated SQL" gap this test guards.
-    expect(Object.keys(capability).sort()).toEqual(["healthCheck", "query"]);
+    // healthCheck (feature #24) and getMetrics (feature #26) are the only
+    // other public members — see this file's "healthCheck (feature #24)"
+    // and "getMetrics (feature #26)" describe blocks below. Neither accepts
+    // a raw SQL string either (both take no arguments at all), so neither
+    // reopens the "no raw interpolated SQL" gap this test guards.
+    expect(Object.keys(capability).sort()).toEqual(["getMetrics", "healthCheck", "query"]);
     expect(typeof capability.query).toBe("function");
     // The one and only public method takes exactly one argument (`fn`) —
     // there is no second `params`/`sql` parameter slot to smuggle a raw
@@ -190,5 +212,35 @@ describe("createDbQueryCapability — healthCheck (feature #24)", () => {
     await capability.healthCheck();
 
     expect(sleep).not.toHaveBeenCalled();
+  });
+});
+
+describe("createDbQueryCapability — getMetrics (feature #26)", () => {
+  it("takes no arguments and returns an all-zero snapshot when no recorder is wired in", () => {
+    const capability = createDbQueryCapability(FAKE_DB);
+    expect(typeof capability.getMetrics).toBe("function");
+    expect(capability.getMetrics.length).toBe(0);
+    expect(capability.getMetrics()).toEqual({
+      queryCount: 0,
+      errorCount: 0,
+      averageDurationMs: 0,
+    });
+  });
+
+  it("proxies to the shared recorder passed in via options.metrics, reflecting events recorded elsewhere", () => {
+    const metrics = createQueryMetricsRecorder();
+    const capability = createDbQueryCapability(FAKE_DB, { metrics });
+
+    // Simulates db.ts's Kysely `log` hook (see query-metrics.ts) feeding
+    // real query events into the same recorder instance — getMetrics()
+    // must reflect that shared state, not a private copy of its own.
+    metrics.record(fakeLogEvent({ durationMs: 12 }));
+    metrics.record(fakeLogEvent({ durationMs: 8, error: new Error("boom") }));
+
+    expect(capability.getMetrics()).toEqual({
+      queryCount: 2,
+      errorCount: 1,
+      averageDurationMs: 10,
+    });
   });
 });
