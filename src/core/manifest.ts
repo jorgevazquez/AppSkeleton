@@ -33,18 +33,37 @@ import { z } from "zod";
 import { ValidationError } from "./errors.js";
 import { err, ok, type Result } from "./types.js";
 
-/** Lowercase-kebab-case: starts with a letter, digits allowed, single hyphens between segments. */
-const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
-const PLUGIN_ID_DESCRIPTION = 'lowercase-kebab-case (e.g. "database-mysql")';
+/**
+ * Lowercase-kebab-case: starts with a letter, digits allowed, single hyphens
+ * between segments. Exported (not just used internally) so it is the single
+ * source of truth other code — and `docs/plugin-conventions.md` via the test
+ * that checks it, see `tests/core/plugin-conventions.test.ts` — can check
+ * itself against, rather than a second, hand-copied regex silently drifting
+ * from this one.
+ */
+export const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+export const PLUGIN_ID_DESCRIPTION = 'lowercase-kebab-case (e.g. "database-mysql")';
 
-/** `namespace:action`, each segment lowercase-kebab-case — e.g. "db:query", "http:route". */
-const CAPABILITY_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*:[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
-const CAPABILITY_DESCRIPTION =
+/**
+ * `namespace:action` (equivalently "resource:action" — see spec.md's rbac
+ * section, which uses that name for the same grammar), each segment
+ * lowercase-kebab-case — e.g. "db:query", "http:route". Exported for the
+ * same doc-drift-prevention reason as {@link PLUGIN_ID_PATTERN} above; this
+ * is the pattern `docs/plugin-conventions.md` documents and
+ * `tests/core/plugin-conventions.test.ts` asserts the doc's copy matches
+ * exactly.
+ */
+export const CAPABILITY_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*:[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+export const CAPABILITY_DESCRIPTION =
   '"namespace:action" grammar, lowercase-kebab-case segments (e.g. "db:query")';
 
-/** Relative path (no leading "/", no ".." traversal) ending in a JS/TS module extension. */
-const ENTRY_POINT_PATTERN = /^(?!\/)(?!.*\.\.(?:\/|$))[A-Za-z0-9_./-]+\.(?:ts|js|mjs|cjs)$/;
-const ENTRY_POINT_DESCRIPTION =
+/**
+ * Relative path (no leading "/", no ".." traversal) ending in a JS/TS module
+ * extension. Exported for the same doc-drift-prevention reason as
+ * {@link PLUGIN_ID_PATTERN} above.
+ */
+export const ENTRY_POINT_PATTERN = /^(?!\/)(?!.*\.\.(?:\/|$))[A-Za-z0-9_./-]+\.(?:ts|js|mjs|cjs)$/;
+export const ENTRY_POINT_DESCRIPTION =
   'a relative path with no leading "/" and no ".." segments, ending in .ts/.js/.mjs/.cjs (e.g. "index.ts")';
 
 /**
