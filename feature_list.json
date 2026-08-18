@@ -517,7 +517,7 @@
       "Write a test simulating first-run vs. already-provisioned states"
     ],
     "depends_on": [37],
-    "passes": false
+    "passes": true
   },
   {
     "id": 41,
