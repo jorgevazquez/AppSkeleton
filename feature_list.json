@@ -491,7 +491,7 @@
       "Write a test asserting a denied check produces a queryable audit entry"
     ],
     "depends_on": [11, 33],
-    "passes": false
+    "passes": true
   },
   {
     "id": 39,

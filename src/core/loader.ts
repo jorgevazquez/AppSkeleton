@@ -70,6 +70,7 @@
  * attempted, and any failures are aggregated into one `Err(PluginLoadError)`
  * afterward.
  */
+import type { AuditSink } from "./audit.js";
 import type { CapabilityBroker, PluginCapabilityAccess } from "./broker.js";
 import { PluginLoadError } from "./errors.js";
 import { resolveLoadOrder } from "./graph.js";
@@ -85,6 +86,19 @@ export interface PluginLifecycleContext {
   readonly capabilities: PluginCapabilityAccess;
   /** A logger pre-scoped with `{ plugin: manifest.id }` context. */
   readonly logger: Logger;
+  /**
+   * The kernel's shared audit trail sink (audit.ts, feature #11), threaded
+   * to every plugin the same way `broker.ts` threads it into the capability
+   * broker itself — so a plugin whose own domain has audit-worthy decisions
+   * (e.g. rbac's `can()`-backed access checks, feature #38) can record to
+   * the *same* kernel audit trail the broker's own grant/revoke/obtain
+   * events go to, without importing a singleton. Optional and undefined by
+   * default (mirrors `CapabilityBrokerOptions.auditSink`): a plugin loaded
+   * via a `loadPlugins()` call that didn't pass one — most existing unit
+   * tests — simply has nothing to record to, and any plugin depending on
+   * this must treat a missing sink as "don't audit", never as an error.
+   */
+  readonly auditSink?: AuditSink;
 }
 
 /** A single lifecycle hook. May be synchronous or return a Promise; the loader always awaits it. */
@@ -135,6 +149,12 @@ export interface LoadPluginsOptions {
   logger?: Logger;
   /** Defaults to {@link grantAllDeclared}. */
   grantPolicy?: GrantPolicy;
+  /**
+   * The kernel's shared audit sink, threaded into every plugin's
+   * {@link PluginLifecycleContext} (feature #38). Optional — omit it (as
+   * most tests do) and every plugin's `context.auditSink` is `undefined`.
+   */
+  auditSink?: AuditSink;
 }
 
 /** One plugin that completed `onInstall` + `onEnable`, and everything needed to unload it later. */
@@ -299,6 +319,7 @@ export async function loadPlugins(
         manifest,
         capabilities: broker.forPlugin(id),
         logger: withContext(logger, { plugin: id }),
+        ...(options.auditSink !== undefined ? { auditSink: options.auditSink } : {}),
       };
 
       await module.onInstall?.(context);
