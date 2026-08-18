@@ -66,6 +66,10 @@ jobs:
           DB_PASSWORD: change-me
           DB_NAME: appskeleton
 
+      # Includes tests/plugins/html-renderer/xss-regression.test.ts (feature #54), the
+      # table-driven XSS regression suite that cross-multiplies known payloads against every
+      # non-raw escaping context (HTML/attribute/URL/JS) plus the audited {{{raw ...}}} helper —
+      # a failure here fails this required job exactly like any other test failure would.
       - name: Unit + integration tests
         run: npm test
         env:
