@@ -21,6 +21,12 @@
  *      docs (feature #8) flagged as still missing and left for this feature.
  *   5. Resolve dependency order and run every plugin's lifecycle hooks
  *      (loader.ts's `loadPlugins()`), wired to the broker built in step 3.
+ *   6. Once every plugin has finished its load attempt, reach the Fastify
+ *      instance the `api-gateway` plugin constructed in its own `onEnable`
+ *      (feature #58 — this module never calls `Fastify(...)` itself) via its
+ *      `http:route` capability, and start listening on it ({@link listen}).
+ *      This is why listening only ever happens strictly after the whole
+ *      plugin-load pass completes, never mid-load.
  *
  * ## Fatal vs. isolated failures
  *
@@ -63,7 +69,6 @@
  */
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import Fastify from "fastify";
 import { createInMemoryAuditSink, type InMemoryAuditSink } from "../core/audit.js";
 import { createCapabilityBroker, type CapabilityBroker } from "../core/broker.js";
 import { loadCoreConfig, type CoreConfig } from "../core/config.js";
@@ -81,6 +86,17 @@ import { validateManifest, type PluginManifest } from "../core/manifest.js";
 import { createPluginStatusTracker, type PluginStatusTracker } from "../core/plugin-status.js";
 import { scanPluginDirectories, type PluginScanEntry } from "../core/registry.js";
 import { isErr } from "../core/types.js";
+// Type-only: erased at compile time, so this does not create a runtime
+// dependency from the kernel on a specific plugin's module — the kernel
+// still only ever *reaches* api-gateway's Fastify instance dynamically,
+// through the `http:route` capability a `LoadedPlugin`'s `module.provides`
+// already carries (see `getHttpApp` below). This mirrors how a *consuming*
+// plugin type-imports another plugin's capability interface purely for
+// `capabilities.obtain<T>()`'s type parameter (see e.g.
+// `database-mysql/src/query-capability.ts`'s `DbQueryCapability`) — spec.md's
+// "no plugin imports another plugin's internals directly" is about runtime
+// coupling, which a type-only import never creates.
+import type { ApiGatewayApp, HttpRouteCapability } from "../plugins/api-gateway/index.js";
 
 /** Every shared kernel primitive, wired together and ready to hand to the HTTP layer. */
 export interface Kernel {
@@ -106,6 +122,14 @@ export interface Kernel {
    * introspect.ts's `introspectKernel()`.
    */
   introspect(): KernelIntrospectionReport;
+  /**
+   * The Fastify instance the `api-gateway` plugin constructed in its own
+   * `onEnable` hook (feature #58), reached only through its `http:route`
+   * capability registration — never constructed by the kernel itself.
+   * `undefined` when `api-gateway` is absent or failed to load, in which case
+   * there is no HTTP server to mount/listen on for this boot.
+   */
+  readonly httpApp: ApiGatewayApp | undefined;
 }
 
 export interface BootstrapKernelOptions {
@@ -202,6 +226,50 @@ async function discoverPluginDefinitions(
   return definitions;
 }
 
+/** The plugin id spec.md designates as "the single place HTTP routes come into existence." */
+const API_GATEWAY_PLUGIN_ID = "api-gateway";
+
+/** Narrow, structural check — no runtime dependency on api-gateway's module, just its documented shape. */
+function isHttpRouteCapability(value: unknown): value is HttpRouteCapability {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "getApp" in value &&
+    typeof (value as { getApp: unknown }).getApp === "function"
+  );
+}
+
+/**
+ * Reach the Fastify instance `api-gateway` constructed in its own `onEnable`
+ * (see `src/plugins/api-gateway/index.ts`) via the `http:route` capability it
+ * registered with the broker — read directly off the already-loaded plugin's
+ * `module.provides`, the same way `introspect.ts` reads plugin state
+ * directly rather than through `broker.forPlugin()`'s identity-gated
+ * `obtain()` (which is for *other plugins*, not the kernel itself). Returns
+ * `undefined` — never throws — when `api-gateway` did not load successfully
+ * or its `http:route` provider doesn't have the expected shape, so a missing
+ * or broken api-gateway is just "no HTTP server this boot" rather than a
+ * kernel-crashing error; the caller decides whether that's fatal.
+ */
+function getHttpApp(plugins: PluginLoadResult, logger: Logger): ApiGatewayApp | undefined {
+  const apiGateway = plugins.loaded.find((plugin) => plugin.id === API_GATEWAY_PLUGIN_ID);
+  if (!apiGateway) {
+    return undefined;
+  }
+
+  const httpRoute = apiGateway.module.provides?.["http:route"];
+  if (!isHttpRouteCapability(httpRoute)) {
+    logger.warn(
+      { plugin: API_GATEWAY_PLUGIN_ID },
+      `Plugin "${API_GATEWAY_PLUGIN_ID}" loaded but its "http:route" capability does not have the ` +
+        `expected shape; no HTTP server will be mounted for this boot.`,
+    );
+    return undefined;
+  }
+
+  return httpRoute.getApp();
+}
+
 /**
  * Construct the whole kernel: load config, build the logger, wire the
  * broker/audit sink/event bus together, discover plugins, and load them in
@@ -240,6 +308,8 @@ export async function bootstrapKernel(options: BootstrapKernelOptions = {}): Pro
     "Kernel bootstrap complete.",
   );
 
+  const httpApp = getHttpApp(plugins, logger);
+
   return {
     config,
     logger,
@@ -249,59 +319,34 @@ export async function bootstrapKernel(options: BootstrapKernelOptions = {}): Pro
     plugins,
     pluginStatus,
     introspect: () => introspectKernel(plugins, broker, pluginStatus),
+    httpApp,
   };
 }
 
-export interface BuildServerOptions {
-  /**
-   * A booted {@link Kernel} to wire into the HTTP layer (shares its logger,
-   * surfaces plugin load counts on `/health`). Omit for the bare
-   * toolchain-smoke-test shape used before any kernel exists.
-   */
-  kernel?: Kernel;
-}
-
-export function buildServer(options: BuildServerOptions = {}) {
-  const { kernel } = options;
-  const app = Fastify({
-    // Use the kernel's own createLogger() rather than Fastify's built-in
-    // `logger: true` pino instance — the latter has no knowledge of this
-    // codebase's secret-redaction hook, so a future route handler logging
-    // e.g. `request.log.info({ headers: request.headers }, ...)` would emit
-    // an Authorization header (or any other secret-shaped field) in the
-    // clear. Deliberately a *fresh* `createLogger()` call rather than
-    // `withContext(kernel.logger, { module: "http" })`: pino's `child()`
-    // bindings are appended alongside the parent's `base` fields, not merged
-    // into them, so overriding a `base`-level key (`module: "kernel"`) this
-    // way would emit it twice per line instead of cleanly replacing it.
-    // Sharing the resolved config's LOG_LEVEL keeps HTTP logs at the same
-    // verbosity as every other kernel log line when a kernel was built; fall
-    // back to the default level for the bare, kernel-less toolchain smoke test.
-    loggerInstance: createLogger({
-      ...(kernel ? { level: kernel.config.LOG_LEVEL } : {}),
-      context: { module: "http" },
-    }),
-  });
-
-  app.get("/health", async () => ({
-    status: "ok",
-    ...(kernel
-      ? {
-          plugins: {
-            loaded: kernel.plugins.loaded.length,
-            failed: kernel.plugins.failed.length,
-          },
-        }
-      : {}),
-  }));
-
-  return app;
+/**
+ * Start listening on the kernel's api-gateway-owned Fastify instance. Only
+ * ever called after `bootstrapKernel()` has resolved — i.e. after every
+ * plugin has finished its load attempt (loaded or isolated-failed) — so
+ * listening always happens strictly after the full plugin-load pass, never
+ * mid-load (feature #58's step 2). A missing `httpApp` (api-gateway absent
+ * or failed to load) is fatal here: with no HTTP server constructed, there
+ * is nothing to listen on. Exported so tests can exercise this guarantee
+ * directly against a real `bootstrapKernel()`-produced `Kernel`, without
+ * spawning the process-exiting `main()`.
+ */
+export async function listen(kernel: Kernel): Promise<void> {
+  if (!kernel.httpApp) {
+    throw new PluginLoadError(
+      `Plugin "${API_GATEWAY_PLUGIN_ID}" did not load successfully; no HTTP server available to start.`,
+      { details: { pluginId: API_GATEWAY_PLUGIN_ID } },
+    );
+  }
+  await kernel.httpApp.listen({ port: kernel.config.PORT, host: "0.0.0.0" });
 }
 
 async function main(): Promise<void> {
   const kernel = await bootstrapKernel();
-  const app = buildServer({ kernel });
-  await app.listen({ port: kernel.config.PORT, host: "0.0.0.0" });
+  await listen(kernel);
 }
 
 // Only auto-start when this module is run directly (not when imported by
