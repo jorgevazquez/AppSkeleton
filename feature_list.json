@@ -1336,7 +1336,7 @@
       "Confirm the step fails the build on a high/critical finding by testing against a known-vulnerable fixture package.json in a scratch branch"
     ],
     "depends_on": [103],
-    "passes": false
+    "passes": true
   },
   {
     "id": 105,
