@@ -58,6 +58,11 @@ export type {
   RouteSchema,
 } from "./src/route-capability.js";
 
+// Re-exported so a consuming plugin (or a test) can reference the default
+// API version segment `registerRoute()` prefixes routes with (feature #62)
+// without hard-coding the literal "v1" — see ./src/route-capability.ts.
+export { DEFAULT_API_VERSION } from "./src/route-capability.js";
+
 /**
  * Construct the Fastify instance this plugin owns, with the given lifecycle
  * context's logger level. A standalone function — rather than inlining this

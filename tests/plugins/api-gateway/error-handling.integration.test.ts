@@ -124,7 +124,7 @@ describe("api-gateway — uniform 4xx/5xx error envelope (feature #60)", () => {
     // Missing the required "name" field — fails the declared body schema.
     const res = await app.inject({
       method: "POST",
-      url: "/widgets",
+      url: "/api/v1/widgets",
       payload: {},
     });
 
@@ -157,7 +157,7 @@ describe("api-gateway — uniform 4xx/5xx error envelope (feature #60)", () => {
     // declared body schema.
     const res = await app.inject({
       method: "POST",
-      url: "/widgets",
+      url: "/api/v1/widgets",
       payload: { name: { nested: true } },
     });
 
@@ -172,7 +172,7 @@ describe("api-gateway — uniform 4xx/5xx error envelope (feature #60)", () => {
 
     const res = await app.inject({
       method: "POST",
-      url: "/widgets",
+      url: "/api/v1/widgets",
       payload: { name: "gadget" },
     });
 
@@ -185,7 +185,7 @@ describe("api-gateway — uniform 4xx/5xx error envelope (feature #60)", () => {
   it("an AppError a route handler throws (e.g. CapabilityDeniedError) is serialized via its own toJSON(), with the matching status code", async () => {
     const app = await loadWithFixtureRoutes();
 
-    const res = await app.inject({ method: "GET", url: "/secret" });
+    const res = await app.inject({ method: "GET", url: "/api/v1/secret" });
 
     expect(res.statusCode).toBe(403);
     expect(res.json()).toEqual({
@@ -216,7 +216,7 @@ describe("api-gateway — uniform 4xx/5xx error envelope (feature #60)", () => {
 
     const res = await app.inject({
       method: "POST",
-      url: "/widgets",
+      url: "/api/v1/widgets",
       headers: { "content-type": "application/json" },
       payload: "{ this is not valid json",
     });

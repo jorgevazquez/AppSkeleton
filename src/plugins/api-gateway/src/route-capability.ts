@@ -76,6 +76,19 @@ export interface RegisterRouteOptions {
   readonly path: string;
   readonly schema: RouteSchema;
   readonly handler: RouteHandler;
+  /**
+   * The API version segment this route is mounted under (feature #62 — "API
+   * versioning convention"). `options.path` is prefixed as `/api/<version>`
+   * before being handed to Fastify — a route registered with `path:
+   * "/widgets"` is reachable at `/api/v1/widgets`, never at bare `/widgets`.
+   * Defaults to {@link DEFAULT_API_VERSION} ("v1"); the overwhelming
+   * majority of `registerRoute()` callers should omit this entirely and let
+   * the default apply. Pass a different segment (e.g. `"v2"`) only when
+   * deliberately introducing a new, breaking API version alongside the
+   * existing one — see `docs/api-versioning.md` for the full
+   * versioning/deprecation policy this implements.
+   */
+  readonly version?: string;
 }
 
 /** What `http:route` exposes for *registering* new routes — merged into `HttpRouteCapability` alongside `getApp()` in `../index.ts`. */
@@ -91,12 +104,51 @@ export interface HttpRouteRegistrationCapability {
    * an unknown keyword) surfaces as whatever error Fastify's own schema
    * compiler (ajv) raises at route-registration time, not from this
    * function.
+   *
+   * `options.path` is always mounted under an API version segment
+   * (`/api/<version>`, defaulting to `/api/v1` — feature #62). A route
+   * registered with `path: "/widgets"` is reachable at `/api/v1/widgets`;
+   * it is never reachable at bare `/widgets`. See
+   * `docs/api-versioning.md` for the full policy.
    */
   registerRoute(options: RegisterRouteOptions): void;
 }
 
 /** The request-schema slots `assertDeclaresRequestAndResponseSchema` checks — every one of `RouteRequestSchema`'s own keys. */
 const REQUEST_SCHEMA_KEYS = ["body", "querystring", "params", "headers"] as const;
+
+/**
+ * The API version segment `registerRoute()` prefixes a route's `path` with
+ * when `options.version` is omitted (feature #62). See
+ * `docs/api-versioning.md` for the versioning/deprecation policy this
+ * implements.
+ */
+export const DEFAULT_API_VERSION = "v1";
+
+/** A version segment must look like `v1`, `v2`, `v10`, etc. — matches this repo's `/api/v<N>` convention (docs/api-versioning.md). */
+const API_VERSION_PATTERN = /^v[1-9][0-9]*$/;
+
+/**
+ * Prefix `options.path` with `/api/<version>` (feature #62, step 1). Throws
+ * {@link ValidationError} if `version` doesn't look like a version segment
+ * (`v1`, `v2`, ...) — this can only be reached via a caller-supplied
+ * `options.version`, since {@link DEFAULT_API_VERSION} itself always
+ * matches.
+ */
+function buildVersionedPath(options: RegisterRouteOptions, version: string): string {
+  const routeLabel = `${options.method} ${options.path}`;
+
+  if (!API_VERSION_PATTERN.test(version)) {
+    throw new ValidationError(
+      `registerRoute("${routeLabel}"): version "${version}" is not a valid API version segment — ` +
+        `expected something matching ${API_VERSION_PATTERN.toString()} (e.g. "v1", "v2").`,
+      { details: { method: options.method, path: options.path, version } },
+    );
+  }
+
+  const suffix = options.path.startsWith("/") ? options.path : `/${options.path}`;
+  return `/api/${version}${suffix}`;
+}
 
 /**
  * Runtime backstop for step 2 — see module docs for why this can't be
@@ -146,9 +198,11 @@ export function createRouteRegistrar(getApp: () => ApiGatewayApp): HttpRouteRegi
     registerRoute(options: RegisterRouteOptions): void {
       assertDeclaresRequestAndResponseSchema(options);
 
+      const versionedPath = buildVersionedPath(options, options.version ?? DEFAULT_API_VERSION);
+
       getApp().route({
         method: options.method,
-        url: options.path,
+        url: versionedPath,
         schema: options.schema,
         handler: options.handler,
       } as AppRouteOptions);
