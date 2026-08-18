@@ -15,6 +15,29 @@ jobs:
   lint-typecheck-build-test:
     name: Lint, typecheck, build, and test
     runs-on: ubuntu-latest
+
+    # MySQL service container so the database-mysql plugin's
+    # *.integration.test.ts suites (see tests/plugins/database-mysql/) run
+    # for real in CI instead of self-skipping — same image/credentials/
+    # healthcheck as docker-compose.yml's local `mysql` service, so a
+    # passing suite here means the same thing as a passing suite locally
+    # under `docker compose up -d mysql` (feature #27, steps 2-3).
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: appskeleton
+          MYSQL_USER: appskeleton
+          MYSQL_PASSWORD: change-me
+          MYSQL_ROOT_PASSWORD: change-me-root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -u root -pchange-me-root"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -34,5 +57,20 @@ jobs:
       - name: Build (includes TypeScript type checking)
         run: npm run build
 
-      - name: Unit tests
+      - name: Run database-mysql migrations
+        run: npm run migrate
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: "3306"
+          DB_USER: appskeleton
+          DB_PASSWORD: change-me
+          DB_NAME: appskeleton
+
+      - name: Unit + integration tests
         run: npm test
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: "3306"
+          DB_USER: appskeleton
+          DB_PASSWORD: change-me
+          DB_NAME: appskeleton

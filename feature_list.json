@@ -348,7 +348,7 @@
       "Run npm test locally with docker-compose mysql up and confirm all pass"
     ],
     "depends_on": [19, 20, 21],
-    "passes": false
+    "passes": true
   },
   {
     "id": 28,
