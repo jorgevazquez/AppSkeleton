@@ -41,6 +41,26 @@ import {
   createRouteRegistrar,
   type HttpRouteRegistrationCapability,
 } from "./src/route-capability.js";
+import { loadCookieConfig } from "./src/session-config.js";
+import { registerSessionCookies } from "./src/session.js";
+
+// Re-exported so a consuming plugin (or a test) can issue/verify signed
+// session cookies without reaching into this plugin's `src/` internals —
+// feature #63, see `./src/session.ts` and `./src/session-config.ts` for the
+// full contract.
+export {
+  issueSessionCookie,
+  issueSessionId,
+  readSessionId,
+  registerSessionCookies,
+  verifySessionId,
+} from "./src/session.js";
+export {
+  loadCookieConfig,
+  loadSessionConfig,
+  type CookieConfig,
+  type SessionConfig,
+} from "./src/session-config.js";
 
 // Re-exported so a consuming plugin can type-only import everything it
 // needs for `capabilities.obtain<HttpRouteCapability>("http:route")` calls
@@ -89,6 +109,14 @@ function buildApp(context: PluginLifecycleContext) {
   // schema-validation failures, and unmatched routes alike — see
   // ./src/error-handler.ts's module docs.
   registerErrorHandling(built);
+
+  // Wired before any route is registered (feature #63) so `request.cookies`
+  // is already populated and `reply.setCookie()` already carries the secure
+  // (HttpOnly/Secure/SameSite=Lax) defaults for /health and every route a
+  // consumer registers via registerRoute(). Only loads COOKIE_SECURE — see
+  // ./src/session-config.ts's module docs on why this can't require
+  // SESSION_SECRET to be configured yet, this early in boot.
+  registerSessionCookies(built, loadCookieConfig());
 
   built.get("/health", async () => ({ status: "ok" }));
 
