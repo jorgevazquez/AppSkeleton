@@ -210,4 +210,30 @@ describe.runIf(mysqlReachable)("db:query capability — parameterized-only integ
       ),
     ).rejects.toMatchObject({ code: "DATABASE_ERROR" });
   });
+
+  it("healthCheck() reports healthy against the real, reachable docker-compose MySQL (feature #24)", async () => {
+    await expect(capability.healthCheck()).resolves.toEqual({ healthy: true });
+  });
 });
+
+describe.runIf(mysqlReachable)(
+  "db:query capability — healthCheck() reports unhealthy when unreachable (feature #24)",
+  () => {
+    it("resolves { healthy: false, error } rather than rejecting when the pool points at an unreachable host", async () => {
+      // A pool pointed at a closed port on localhost — nothing is listening,
+      // so every connection attempt fails immediately, the same shape of
+      // failure a genuinely down MySQL server would produce.
+      const deadPool = createDbPool({ ...DOCKER_COMPOSE_CONFIG, DB_PORT: 1 });
+      const deadDb = createKyselyDb(deadPool);
+      const deadCapability = createDbQueryCapability(deadDb);
+
+      try {
+        const result = await deadCapability.healthCheck();
+        expect(result.healthy).toBe(false);
+        expect(typeof result.error).toBe("string");
+      } finally {
+        await deadDb.destroy();
+      }
+    });
+  },
+);

@@ -27,9 +27,13 @@ describe("createDbQueryCapability — db:query capability object", () => {
     expect(fn).toHaveBeenCalledWith(FAKE_DB);
   });
 
-  it("exposes only `query` — no `query(sql, params)` string-accepting overload or any other method", () => {
+  it("exposes only `query` and `healthCheck` — no `query(sql, params)` string-accepting overload", () => {
     const capability = createDbQueryCapability(FAKE_DB);
-    expect(Object.keys(capability)).toEqual(["query"]);
+    // healthCheck (feature #24) is the one other public member — see this
+    // file's "healthCheck (feature #24)" describe block below. It never
+    // accepts a raw SQL string either (it takes no arguments at all), so it
+    // doesn't reopen the "no raw interpolated SQL" gap this test guards.
+    expect(Object.keys(capability).sort()).toEqual(["healthCheck", "query"]);
     expect(typeof capability.query).toBe("function");
     // The one and only public method takes exactly one argument (`fn`) —
     // there is no second `params`/`sql` parameter slot to smuggle a raw
@@ -155,5 +159,36 @@ describe("createDbQueryCapability — connection resilience (feature #23)", () =
     // Pool exhaustion is a capacity problem, not a transient network blip —
     // it must never be silently retried.
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createDbQueryCapability — healthCheck (feature #24)", () => {
+  it("takes no arguments", () => {
+    const capability = createDbQueryCapability(FAKE_DB);
+    expect(typeof capability.healthCheck).toBe("function");
+    expect(capability.healthCheck.length).toBe(0);
+  });
+
+  it("reports unhealthy (never rejects) when running SELECT 1 against the database fails", async () => {
+    // FAKE_DB is a bare `{}` standing in for `Kysely<Database>` — it has none
+    // of Kysely's real internals, so `sql\`SELECT 1\`.execute(db)` fails
+    // immediately, the same shape of failure a genuinely unreachable MySQL
+    // server would produce. healthCheck() must catch this itself and resolve
+    // `{ healthy: false, error }` rather than letting the rejection escape.
+    const capability = createDbQueryCapability(FAKE_DB);
+
+    await expect(capability.healthCheck()).resolves.toEqual({
+      healthy: false,
+      error: expect.any(String) as unknown as string,
+    });
+  });
+
+  it("does not go through retryWithBackoff — a failing check resolves immediately with no sleep", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const capability = createDbQueryCapability(FAKE_DB, { retry: { sleep, retries: 4 } });
+
+    await capability.healthCheck();
+
+    expect(sleep).not.toHaveBeenCalled();
   });
 });

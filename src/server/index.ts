@@ -74,7 +74,11 @@ import { createCapabilityBroker, type CapabilityBroker } from "../core/broker.js
 import { loadCoreConfig, type CoreConfig } from "../core/config.js";
 import { isAppError, PluginLoadError } from "../core/errors.js";
 import { createEventBus, type EventBus } from "../core/events.js";
-import { introspectKernel, type KernelIntrospectionReport } from "../core/introspect.js";
+import {
+  introspectKernel,
+  introspectKernelWithHealth,
+  type KernelIntrospectionReport,
+} from "../core/introspect.js";
 import {
   loadPlugins,
   type PluginDefinition,
@@ -126,6 +130,15 @@ export interface Kernel {
    * introspect.ts's `introspectKernel()`.
    */
   introspect(): KernelIntrospectionReport;
+  /**
+   * Same report as {@link introspect}, augmented with a per-plugin `health`
+   * field (feature #24) sourced from any provided capability whose
+   * implementation exposes a `healthCheck()` method — e.g. database-mysql's
+   * `db:query` capability's trivial `SELECT 1` probe. Async (an actual live
+   * network probe, unlike the rest of the report) — see introspect.ts's
+   * `introspectKernelWithHealth()` for the exact contract.
+   */
+  introspectWithHealth(): Promise<KernelIntrospectionReport>;
   /**
    * Disable a loaded plugin at runtime — no full process restart (feature
    * #16). Runs the plugin's `onDisable` hook, then flips `pluginStatus` so
@@ -339,6 +352,7 @@ export async function bootstrapKernel(options: BootstrapKernelOptions = {}): Pro
     plugins,
     pluginStatus,
     introspect: () => introspectKernel(plugins, broker, pluginStatus),
+    introspectWithHealth: () => introspectKernelWithHealth(plugins, broker, pluginStatus),
     disablePlugin: (pluginId: string) => disablePluginRuntime(plugins, pluginStatus, pluginId),
     enablePlugin: (pluginId: string) => enablePluginRuntime(plugins, pluginStatus, pluginId),
     httpApp,

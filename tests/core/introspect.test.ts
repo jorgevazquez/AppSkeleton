@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createCapabilityBroker, type CapabilityBroker } from "../../src/core/broker.js";
-import { formatIntrospectionReport, introspectKernel } from "../../src/core/introspect.js";
+import {
+  formatIntrospectionReport,
+  introspectKernel,
+  introspectKernelWithHealth,
+} from "../../src/core/introspect.js";
 import { loadPlugins, type PluginDefinition, type PluginModule } from "../../src/core/loader.js";
 import type { PluginManifest } from "../../src/core/manifest.js";
 import { createPluginStatusTracker } from "../../src/core/plugin-status.js";
@@ -284,5 +288,171 @@ describe("formatIntrospectionReport", () => {
 
     expect(text).toContain("(no plugins loaded)");
     expect(text).toContain("Summary: 0 total — 0 loaded, 0 failed, 0 disabled.");
+  });
+});
+
+describe("introspectKernelWithHealth (feature #24 — database health check integrated into kernel introspection)", () => {
+  it("reports 'unhealthy' for a plugin whose db:query-shaped capability's healthCheck() resolves healthy: false", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("database-mysql", { provides: ["db:query"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": {
+              query: async () => {
+                throw new Error("unused in this test");
+              },
+              // Mirrors query-capability.ts's DbQueryCapability.healthCheck
+              // contract: a trivial SELECT 1 that failed because the
+              // database is unreachable, normalized to a resolved (not
+              // rejected) result.
+              healthCheck: async () => ({
+                healthy: false,
+                error: "connect ECONNREFUSED 127.0.0.1:3306",
+              }),
+            },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = await introspectKernelWithHealth(result, broker);
+
+    const plugin = report.plugins.find((p) => p.id === "database-mysql");
+    expect(plugin?.health).toEqual({
+      status: "unhealthy",
+      error: "connect ECONNREFUSED 127.0.0.1:3306",
+    });
+  });
+
+  it("reports 'unhealthy' when the capability's healthCheck() rejects instead of resolving, rather than throwing out of introspection", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("database-mysql", { provides: ["db:query"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": {
+              query: async () => "unused",
+              healthCheck: async () => {
+                throw new Error("connect ETIMEDOUT");
+              },
+            },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = await introspectKernelWithHealth(result, broker);
+
+    expect(report.plugins.find((p) => p.id === "database-mysql")?.health).toEqual({
+      status: "unhealthy",
+      error: "connect ETIMEDOUT",
+    });
+  });
+
+  it("reports 'healthy' for a plugin whose capability's healthCheck() resolves healthy: true", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("database-mysql", { provides: ["db:query"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": {
+              query: async () => "unused",
+              healthCheck: async () => ({ healthy: true }),
+            },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = await introspectKernelWithHealth(result, broker);
+
+    expect(report.plugins.find((p) => p.id === "database-mysql")?.health).toEqual({
+      status: "healthy",
+    });
+  });
+
+  it("omits the health field entirely for a plugin that provides no health-checkable capability", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("html-renderer", { provides: ["render:template"] }),
+        module: moduleFixture({ provides: { "render:template": () => "<html></html>" } }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = await introspectKernelWithHealth(result, broker);
+
+    const plugin = report.plugins.find((p) => p.id === "html-renderer");
+    expect(plugin).toBeDefined();
+    expect(plugin?.health).toBeUndefined();
+    expect("health" in (plugin ?? {})).toBe(false);
+  });
+
+  it("leaves a failed plugin's report untouched — no health field, since there is no live module to probe", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("broken"),
+        module: moduleFixture({
+          onInstall: () => {
+            throw new Error("boom");
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = await introspectKernelWithHealth(result, broker);
+
+    const broken = report.plugins.find((p) => p.id === "broken");
+    expect(broken?.status).toBe("failed");
+    expect(broken?.health).toBeUndefined();
+  });
+
+  it("is unhealthy overall when only one of several health-checkable capabilities a plugin provides is unhealthy", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("multi", { provides: ["db:query", "cache:get"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": { healthCheck: async () => ({ healthy: true }) },
+            "cache:get": { healthCheck: async () => ({ healthy: false, error: "cache down" }) },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = await introspectKernelWithHealth(result, broker);
+
+    expect(report.plugins.find((p) => p.id === "multi")?.health?.status).toBe("unhealthy");
+  });
+
+  it("does not mutate or otherwise alter the plain introspectKernel() report for an unrelated call", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("database-mysql", { provides: ["db:query"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": { healthCheck: async () => ({ healthy: false, error: "down" }) },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const plainReport = introspectKernel(result, broker);
+    expect(plainReport.plugins[0]?.health).toBeUndefined();
+    expect("health" in (plainReport.plugins[0] ?? {})).toBe(false);
   });
 });

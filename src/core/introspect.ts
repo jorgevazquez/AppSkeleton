@@ -32,6 +32,39 @@
  * loader.ts's own failure-rollback already revokes for a `failed` plugin)
  * is always reflected accurately, not just what was true at the moment the
  * plugin loaded.
+ *
+ * ## Per-plugin health (feature #24)
+ *
+ * {@link introspectKernelWithHealth} augments the same report with an
+ * optional `health` field per plugin, sourced from any capability that plugin
+ * provides whose implementation happens to expose a zero-arg
+ * `healthCheck(): Promise<{ healthy, error? }>` method (see
+ * {@link HealthCheckableCapability}) — duck-typed structurally, exactly the
+ * way `server/index.ts`'s `getHttpApp()` reaches api-gateway's `http:route`
+ * capability directly off `LoadedPlugin.module.provides` rather than through
+ * `broker.obtain()` (which is gated to *other plugins*, not the kernel
+ * itself). This is deliberately generic, not hard-coded to database-mysql's
+ * `db:query` capability: any current or future capability (a cache, a queue,
+ * a second database) gets the exact same treatment simply by implementing
+ * `healthCheck()` on the object it registers with the broker — this module
+ * has no import of, or special-case for, any specific plugin.
+ *
+ * A plugin that provides no health-checkable capability gets no `health` key
+ * at all (not `undefined` written out, not a synthetic "unknown" status) —
+ * its report is byte-for-byte identical to what {@link introspectKernel}
+ * alone would have produced, so existing consumers of the base report are
+ * unaffected. A plugin providing one or more health-checkable capabilities is
+ * `"healthy"` only if every one of them reports healthy; the first
+ * unhealthy result's `error` (if any) is surfaced on the plugin's `health`
+ * field. A `healthCheck()` that itself throws/rejects (rather than resolving
+ * `{ healthy: false, ... }` per its own contract) is treated the same as an
+ * explicit unhealthy result — this function never rejects.
+ *
+ * `introspectKernel` itself stays synchronous and unchanged — a plugin's
+ * `health` is inherently a live, point-in-time network probe, unlike the
+ * rest of the report which is derived from already-known in-memory state —
+ * so this is a separate, additive async function rather than a breaking
+ * change to the existing sync API every current caller/test relies on.
  */
 import type { CapabilityBroker } from "./broker.js";
 import type { FailedPlugin, LoadedPlugin, PluginLoadResult } from "./loader.js";
@@ -56,6 +89,37 @@ export interface PluginIntrospectionReport {
   readonly error?: string;
   /** Present only for `status: "failed"` — `true` if this plugin was never attempted because a dependency of it failed first. */
   readonly skipped?: boolean;
+  /**
+   * Present only when {@link introspectKernelWithHealth} produced this report
+   * AND this plugin provides at least one health-checkable capability — see
+   * this module's "Per-plugin health" docs. Absent for `introspectKernel()`'s
+   * plain report, and absent for any plugin with nothing health-checkable to
+   * report on.
+   */
+  readonly health?: PluginHealthReport;
+}
+
+/** `"unhealthy"` if any health-checkable capability a plugin provides reported unhealthy (or threw); `"healthy"` only if every one of them reported healthy. */
+export type PluginHealthStatus = "healthy" | "unhealthy";
+
+/** A single plugin's folded-together health result — see {@link introspectKernelWithHealth}. */
+export interface PluginHealthReport {
+  readonly status: PluginHealthStatus;
+  /** Present only for `status: "unhealthy"`, when the failing check supplied one. */
+  readonly error?: string;
+}
+
+/**
+ * The structural protocol (feature #24) a provided capability's
+ * implementation can opt into for per-plugin health reporting: a zero-arg
+ * `healthCheck()` resolving `{ healthy, error? }`. `database-mysql`'s
+ * `db:query` capability implements this (see `query-capability.ts`'s
+ * `DbQueryCapability.healthCheck`), but nothing here is specific to it — any
+ * capability implementation with a matching `healthCheck` method is picked up
+ * the same way, duck-typed rather than imported.
+ */
+export interface HealthCheckableCapability {
+  healthCheck(): Promise<{ readonly healthy: boolean; readonly error?: string }>;
 }
 
 /** Full kernel introspection report: one entry per plugin plus a status-count summary. */
@@ -144,6 +208,80 @@ export function introspectKernel(
   return { plugins: reports, summary };
 }
 
+/** Human-readable detail from an unknown thrown value — mirrors query-capability.ts's own `describeError`. */
+function describeHealthCheckError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Structural check for {@link HealthCheckableCapability} — a `healthCheck` function on an object, nothing more. */
+function isHealthCheckable(value: unknown): value is HealthCheckableCapability {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "healthCheck" in value &&
+    typeof (value as { healthCheck: unknown }).healthCheck === "function"
+  );
+}
+
+/**
+ * Run every health-checkable capability `module.provides` exposes and fold
+ * the results into one {@link PluginHealthReport}, or `undefined` if none of
+ * them are health-checkable. See this module's "Per-plugin health" docs for
+ * the folding rule (unhealthy wins) and never-throws guarantee.
+ */
+async function healthForModule(
+  provides: Readonly<Record<string, unknown>> | undefined,
+): Promise<PluginHealthReport | undefined> {
+  const checkable = Object.values(provides ?? {}).filter(isHealthCheckable);
+  if (checkable.length === 0) {
+    return undefined;
+  }
+
+  const results = await Promise.all(
+    checkable.map(async (capability) => {
+      try {
+        return await capability.healthCheck();
+      } catch (cause) {
+        return { healthy: false, error: describeHealthCheckError(cause) };
+      }
+    }),
+  );
+
+  const failure = results.find((result) => !result.healthy);
+  if (!failure) {
+    return { status: "healthy" };
+  }
+  return failure.error !== undefined
+    ? { status: "unhealthy", error: failure.error }
+    : { status: "unhealthy" };
+}
+
+/**
+ * Build a {@link KernelIntrospectionReport} exactly like {@link introspectKernel},
+ * then augment each loaded plugin's entry with a `health` field — see this
+ * module's "Per-plugin health" docs. A `failed` plugin's entry is left
+ * untouched (there is no live `module.provides` to probe for a plugin whose
+ * load attempt itself failed). Never rejects.
+ */
+export async function introspectKernelWithHealth(
+  plugins: PluginLoadResult,
+  broker: CapabilityBroker,
+  statusTracker?: PluginStatusTracker,
+): Promise<KernelIntrospectionReport> {
+  const report = introspectKernel(plugins, broker, statusTracker);
+  const loadedById = new Map(plugins.loaded.map((plugin) => [plugin.id, plugin]));
+
+  const withHealth = await Promise.all(
+    report.plugins.map(async (entry): Promise<PluginIntrospectionReport> => {
+      const loaded = loadedById.get(entry.id);
+      const health = await healthForModule(loaded?.module.provides);
+      return health ? { ...entry, health } : entry;
+    }),
+  );
+
+  return { ...report, plugins: withHealth };
+}
+
 function formatCapabilityList(ids: readonly string[]): string {
   return ids.length > 0 ? ids.join(", ") : "(none)";
 }
@@ -166,6 +304,10 @@ export function formatIntrospectionReport(report: KernelIntrospectionReport): st
     lines.push(`  provides: ${formatCapabilityList(plugin.capabilities.provides)}`);
     lines.push(`  requires: ${formatCapabilityList(plugin.capabilities.requires)}`);
     lines.push(`  granted:  ${formatCapabilityList(plugin.capabilities.granted)}`);
+    if (plugin.health) {
+      const suffix = plugin.health.error !== undefined ? ` (${plugin.health.error})` : "";
+      lines.push(`  health:   ${plugin.health.status}${suffix}`);
+    }
     if (plugin.status === "failed") {
       lines.push(`  error:    ${plugin.error ?? "unknown error"}`);
       if (plugin.skipped) {
