@@ -56,9 +56,11 @@ import { err, ok, type Result } from "../../../core/types.js";
 import {
   compilePartialBody,
   parseTemplate,
+  requireRawAudit,
   walkTemplateNodes,
   type CompiledPartialBody,
   type CompiledTemplate,
+  type CompileOptions,
   type PartialResolver,
   type TemplateContext,
 } from "./template.js";
@@ -87,10 +89,21 @@ function resolvePartialSource(partials: PartialSource, name: string): string | u
  * Rejects `source` containing an `{{extends}}` tag: this function doesn't
  * resolve layouts, only partials — use layout.ts's `compileWithLayout` for
  * that (layouts and partials are not currently composable in one call).
+ *
+ * `options.audit` (feature #50) is required if `source` itself contains a
+ * `{{{raw ...}}}` tag. A referenced *partial*'s own body is checked
+ * separately, lazily, the first time that partial is actually resolved (see
+ * `resolvePartial` below) — since which partials get referenced isn't fully
+ * known until render time, same as everything else about partial
+ * resolution (see the module doc's "Why this isn't 'resolve everything up
+ * front'" section). A partial containing `{{{raw ...}}}` when no audit
+ * context was supplied surfaces the same way an unparseable partial body
+ * does: a {@link RenderError} thrown from `render()`, not a `Result`.
  */
 export function compileWithPartials(
   source: string,
   partials: PartialSource,
+  options?: CompileOptions,
 ): Result<CompiledTemplate, ValidationError> {
   const rootResult = parseTemplate(source);
   if (!rootResult.ok) {
@@ -110,6 +123,11 @@ export function compileWithPartials(
           "use compileWithLayout (layout.ts) instead.",
       ),
     );
+  }
+
+  const rawAuditResult = requireRawAudit(rootResult.value, options?.audit);
+  if (!rawAuditResult.ok) {
+    return rawAuditResult;
   }
 
   // Populated lazily, the first time each name is actually resolved at render time — never
@@ -143,15 +161,23 @@ export function compileWithPartials(
       });
     }
 
+    const rawAudit = requireRawAudit(parsed.value, options?.audit);
+    if (!rawAudit.ok) {
+      cache.set(name, rawAudit.error);
+      throw new RenderError(`Partial "${name}" failed to compile: ${rawAudit.error.message}`, {
+        cause: rawAudit.error,
+      });
+    }
+
     // `resolvePartial` is passed to `compilePartialBody` itself, so a `{{> ...}}` tag inside
     // *this* partial's own body resolves through the same cache/registry — including a reference
     // back to `name` itself.
-    const compiledBody = compilePartialBody(parsed.value, resolvePartial);
+    const compiledBody = compilePartialBody(parsed.value, resolvePartial, options?.audit);
     cache.set(name, compiledBody);
     return compiledBody;
   };
 
-  const compiled = compilePartialBody(rootResult.value, resolvePartial);
+  const compiled = compilePartialBody(rootResult.value, resolvePartial, options?.audit);
   return ok({
     render(context: TemplateContext = {}): string {
       const out: string[] = [];

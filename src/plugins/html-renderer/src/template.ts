@@ -85,9 +85,29 @@
  * catch, exceeding it throws a {@link RenderError} from `render()` instead
  * of surfacing as a `Result` — see that class's doc comment.
  *
+ * ## Raw/unescaped output (feature #50)
+ *
+ * `{{{raw path.to.value}}}` — the one, intentionally verbose way to opt out
+ * of auto-escaping. The extra ceremony (triple braces *and* the literal
+ * `raw` keyword, not just `{{{value}}}`) is deliberate: a bare
+ * `{{{value}}}` is still parsed as ordinary text plus a normal, escaped
+ * `{{value}}` tag (see escaping.test.ts's "no opt-out" suite) — there is no
+ * way to accidentally fall into unescaped output by fat-fingering an extra
+ * brace. Because unescaped output is inherently risky, compiling a template
+ * that contains `{{{raw ...}}}` requires the caller to supply a
+ * {@link RawOutputAuditContext} (`{ audit: { auditSink, pluginId,
+ * templateName } }`, passed as `compileTemplate`'s second argument) — every
+ * *render-time* use of the tag then records one {@link AuditEvent} (actor =
+ * pluginId, action = `"template:raw_output"`, target = templateName,
+ * details.expression = the dotted path) to that sink via the kernel's audit
+ * trail (core/audit.ts, feature #11). Omitting the audit context while the
+ * template contains `{{{raw ...}}}` is a compile-time {@link
+ * ValidationError}, not a silent skip — matching feature #47's "no way to
+ * accidentally opt out" posture: the ONE way to opt out of escaping is also
+ * the one way that's structurally impossible to leave unaudited.
+ *
  * ## Deliberately out of scope here
  *
- * - An explicit raw/unescaped-output helper — feature #50.
  * - Compiled-template caching across calls — feature #53.
  *
  * ## Grammar
@@ -126,6 +146,10 @@
  *   context-stack fallback included). A template containing this tag
  *   cannot be compiled with `compileTemplate` directly; see partial.ts's
  *   `compileWithPartials`.
+ * - `{{{raw path.to.value}}}` — unescaped variable interpolation (feature
+ *   #50). Same dotted-path grammar as `{{variable}}`. Requires an audit
+ *   context to be supplied at compile time; see the module doc's "Raw/
+ *   unescaped output" section above.
  *
  * Unknown/malformed tags (unclosed blocks, a stray `{{else}}`/`{{/if}}`/
  * `{{/each}}`/`{{/block}}`, an empty `{{}}`, an invalid path, more than
@@ -134,6 +158,7 @@
  * `compileTemplate` — never thrown — per the kernel's `Result`-based error
  * convention (see core/types.ts).
  */
+import type { AuditSink } from "../../../core/audit.js";
 import { RenderError, ValidationError } from "../../../core/errors.js";
 import { err, ok, type Result } from "../../../core/types.js";
 import { escapeForContext, type EscapeContext } from "./escape.js";
@@ -141,6 +166,25 @@ import { annotateEscapeContexts } from "./html-context.js";
 
 /** Arbitrary render-time data. A template's `{{...}}` paths are resolved against this. */
 export type TemplateContext = Record<string, unknown>;
+
+/**
+ * What a `{{{raw ...}}}` tag records to the kernel audit trail on every
+ * render-time use (feature #50; see the module doc's "Raw/unescaped
+ * output" section). `templateName` is caller-supplied — this module has no
+ * notion of a template's own name/identity (it only ever sees `source`
+ * strings) — a plugin should pass whatever it uses to identify the
+ * template (a file path, a registry key, ...).
+ */
+export interface RawOutputAuditContext {
+  readonly auditSink: AuditSink;
+  readonly pluginId: string;
+  readonly templateName: string;
+}
+
+/** Options accepted by {@link compileTemplate} (and threaded through by layout.ts/partial.ts). */
+export interface CompileOptions {
+  readonly audit?: RawOutputAuditContext;
+}
 
 // ---------------------------------------------------------------------------
 // AST
@@ -200,8 +244,20 @@ export interface PartialNode {
   readonly params: ReadonlyMap<string, PartialParamValue>;
 }
 
+/**
+ * Unescaped variable interpolation (feature #50 — "Explicit raw/unescaped
+ * output helper, audited"). See the module doc's "Raw/unescaped output"
+ * section: unlike {@link VariableNode}, its value is written to output
+ * as-is (no context-aware escaping) and every render-time use of it
+ * records a {@link RawOutputAuditContext} entry.
+ */
+export interface RawNode {
+  readonly kind: "raw";
+  readonly path: readonly string[];
+}
+
 export type TemplateNode =
-  TextNode | VariableNode | IfNode | EachNode | BlockNode | ExtendsNode | PartialNode;
+  TextNode | VariableNode | IfNode | EachNode | BlockNode | ExtendsNode | PartialNode | RawNode;
 
 // ---------------------------------------------------------------------------
 // Tokenizer
@@ -248,6 +304,10 @@ interface PartialToken {
   readonly name: string;
   readonly params: ReadonlyMap<string, PartialParamValue>;
 }
+interface RawToken {
+  readonly type: "raw";
+  readonly path: readonly string[];
+}
 
 type Token =
   | TextToken
@@ -260,7 +320,8 @@ type Token =
   | BlockOpenToken
   | BlockCloseToken
   | ExtendsToken
-  | PartialToken;
+  | PartialToken
+  | RawToken;
 
 /** `path.segment` shape: letters/digits/underscore, not starting with a digit. */
 const PATH_SEGMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -345,7 +406,16 @@ function parsePartialParams(raw: string): Result<Map<string, PartialParamValue>,
   return ok(params);
 }
 
-const TAG_PATTERN = /\{\{\s*([^{}]*?)\s*\}\}/g;
+/**
+ * The `{{{raw ...}}}` alternative is tried first, and requires the literal
+ * `raw` keyword right after the opening triple-brace — so a bare
+ * `{{{value}}}` (no `raw`) never matches it and falls through to the
+ * ordinary double-brace alternative instead, tokenizing as a stray `{`
+ * text run plus a normal, escaped `{{value}}` tag (see escaping.test.ts's
+ * "no opt-out" suite). This is what makes the raw helper "intentionally
+ * verbose": there is no way to reach it except by typing `raw` out.
+ */
+const TAG_PATTERN = /\{\{\{\s*raw\s+([^{}]*?)\s*\}\}\}|\{\{\s*([^{}]*?)\s*\}\}/g;
 
 /** Turn a template source string into a flat token stream (no nesting resolved yet). */
 function tokenize(source: string): Result<Token[], ValidationError> {
@@ -358,8 +428,25 @@ function tokenize(source: string): Result<Token[], ValidationError> {
     if (match.index > lastIndex) {
       tokens.push({ type: "text", value: source.slice(lastIndex, match.index) });
     }
-    const content = (match[1] ?? "").trim();
     lastIndex = TAG_PATTERN.lastIndex;
+
+    const rawExpr = match[1];
+    if (rawExpr !== undefined) {
+      const trimmedRaw = rawExpr.trim();
+      if (trimmedRaw.length === 0) {
+        return err(
+          new ValidationError("Invalid {{{raw ...}}} tag: expected an expression, got none."),
+        );
+      }
+      const rawPathResult = parsePath(trimmedRaw);
+      if (!rawPathResult.ok) {
+        return rawPathResult;
+      }
+      tokens.push({ type: "raw", path: rawPathResult.value });
+      continue;
+    }
+
+    const content = (match[2] ?? "").trim();
 
     if (content.length === 0) {
       return err(new ValidationError("Invalid template tag: `{{}}` has no content."));
@@ -587,6 +674,10 @@ function parseTokens(tokens: readonly Token[]): Result<TemplateNode[], Validatio
           nodes.push({ kind: "partial", name: token.name, params: token.params });
           pos++;
           break;
+        case "raw":
+          nodes.push({ kind: "raw", path: token.path });
+          pos++;
+          break;
         case "else":
           return err(new ValidationError("Unexpected {{else}} with no matching {{#if}}."));
         case "if-close":
@@ -793,6 +884,7 @@ function compileNode(
   node: TemplateNode,
   contexts: EscapeContexts,
   resolvePartial?: PartialResolver,
+  audit?: RawOutputAuditContext,
 ): CompiledNode {
   switch (node.kind) {
     case "text": {
@@ -810,10 +902,33 @@ function compileNode(
         out.push(escapeForContext(stringifyValue(resolve(scope, path)), context));
       };
     }
+    case "raw": {
+      // Unescaped on purpose (feature #50) — see the module doc's "Raw/unescaped output"
+      // section. `compileTemplate`/`compileWithLayout`/`compileWithPartials` all refuse to
+      // compile a template containing a "raw" node unless `audit` was supplied, so by the time
+      // this closure exists, `audit` is guaranteed defined for any tree that actually reaches
+      // here — checked defensively below anyway rather than asserted, in case a future caller
+      // reaches compileNode directly.
+      const path = node.path;
+      const expression = path.join(".");
+      return (scope, out) => {
+        out.push(stringifyValue(resolve(scope, path)));
+        if (audit !== undefined) {
+          audit.auditSink.record({
+            actor: audit.pluginId,
+            action: "template:raw_output",
+            target: audit.templateName,
+            outcome: "rendered",
+            timestamp: Date.now(),
+            details: { expression },
+          });
+        }
+      };
+    }
     case "if": {
       const path = node.path;
-      const consequent = compileNodes(node.consequent, contexts, resolvePartial);
-      const alternate = compileNodes(node.alternate, contexts, resolvePartial);
+      const consequent = compileNodes(node.consequent, contexts, resolvePartial, audit);
+      const alternate = compileNodes(node.alternate, contexts, resolvePartial, audit);
       return (scope, out) => {
         if (isTruthy(resolve(scope, path))) {
           runCompiled(consequent, scope, out);
@@ -824,7 +939,7 @@ function compileNode(
     }
     case "each": {
       const path = node.path;
-      const body = compileNodes(node.body, contexts, resolvePartial);
+      const body = compileNodes(node.body, contexts, resolvePartial, audit);
       return (scope, out) => {
         const collection = resolve(scope, path);
         if (Array.isArray(collection)) {
@@ -858,7 +973,7 @@ function compileNode(
       // composition (layout.ts) replaces `node.body` with the resolved override *before* this
       // function ever runs — see compileResolvedNodes — so by the time a "block" node reaches
       // here, `body` already reflects whichever level of the layout chain won.
-      const body = compileNodes(node.body, contexts, resolvePartial);
+      const body = compileNodes(node.body, contexts, resolvePartial, audit);
       return (scope, out) => {
         runCompiled(body, scope, out);
       };
@@ -917,8 +1032,48 @@ function compileNodes(
   nodes: readonly TemplateNode[],
   contexts: EscapeContexts,
   resolvePartial?: PartialResolver,
+  audit?: RawOutputAuditContext,
 ): CompiledNode[] {
-  return nodes.map((node) => compileNode(node, contexts, resolvePartial));
+  return nodes.map((node) => compileNode(node, contexts, resolvePartial, audit));
+}
+
+/**
+ * Whether `nodes` (or anything nested inside `if`/`each`/`block` bodies —
+ * NOT inside a `{{> partial}}`'s own body, which is resolved and audit-
+ * checked separately, see partial.ts) contains at least one `{{{raw
+ * ...}}}` tag.
+ */
+function containsRawNode(nodes: readonly TemplateNode[]): boolean {
+  let found = false;
+  walkTemplateNodes(nodes, (node) => {
+    if (node.kind === "raw") {
+      found = true;
+    }
+  });
+  return found;
+}
+
+/**
+ * Enforce feature #50's "no unaudited raw output" invariant: `nodes` may
+ * only be compiled without an audit context if it contains zero `{{{raw
+ * ...}}}` tags. Exported so layout.ts/partial.ts can apply the same check
+ * to their own fully-resolved trees before compiling them.
+ */
+export function requireRawAudit(
+  nodes: readonly TemplateNode[],
+  audit: RawOutputAuditContext | undefined,
+): Result<undefined, ValidationError> {
+  if (audit !== undefined || !containsRawNode(nodes)) {
+    return ok(undefined);
+  }
+  return err(
+    new ValidationError(
+      "Template contains a {{{raw ...}}} tag, which requires an audit context to compile — " +
+        "pass { audit: { auditSink, pluginId, templateName } } so every unescaped-output use " +
+        "is recorded in the kernel audit trail.",
+      { details: { reason: "raw_output_requires_audit" } },
+    ),
+  );
 }
 
 /**
@@ -938,13 +1093,20 @@ function compileNodes(
  * no single "position" to scan from. Escaping is therefore based on the
  * partial's own template text, exactly like compiling it with
  * `compileTemplate` would.
+ *
+ * `audit` (feature #50) is passed straight through to every compiled
+ * `{{{raw ...}}}` node in `nodes` — the caller (partial.ts) is responsible
+ * for checking {@link requireRawAudit} against `nodes` before calling this,
+ * exactly as `compileTemplate`/`compileResolvedNodes` do for a standalone
+ * template.
  */
 export function compilePartialBody(
   nodes: readonly TemplateNode[],
   resolvePartial: PartialResolver,
+  audit?: RawOutputAuditContext,
 ): CompiledPartialBody {
   const contexts = annotateEscapeContexts(nodes);
-  const compiled = compileNodes(nodes, contexts, resolvePartial);
+  const compiled = compileNodes(nodes, contexts, resolvePartial, audit);
   return {
     run(data: unknown, partialDepth: number, out: string[]): void {
       const scope: Scope = { data, partialDepth };
@@ -970,10 +1132,18 @@ export interface CompiledTemplate {
  * layout.ts's `compileWithLayout` (source's `{{extends}}` chain has just
  * been resolved into a single tree). Exported so layout.ts never has to
  * reimplement escape-context annotation or closure compilation.
+ *
+ * `audit` (feature #50) is passed straight through to every compiled
+ * `{{{raw ...}}}` node in `nodes`. Callers are responsible for checking
+ * {@link requireRawAudit} against `nodes` first — `compileTemplate` and
+ * `compileWithLayout` both do this before calling here.
  */
-export function compileResolvedNodes(nodes: readonly TemplateNode[]): CompiledTemplate {
+export function compileResolvedNodes(
+  nodes: readonly TemplateNode[],
+  audit?: RawOutputAuditContext,
+): CompiledTemplate {
   const contexts = annotateEscapeContexts(nodes);
-  const compiled = compileNodes(nodes, contexts);
+  const compiled = compileNodes(nodes, contexts, undefined, audit);
   return {
     render(context: TemplateContext = {}): string {
       const out: string[] = [];
@@ -999,8 +1169,15 @@ export function compileResolvedNodes(nodes: readonly TemplateNode[]): CompiledTe
  * Also rejects (same error type) any template containing a `{{> partial}}`
  * tag — resolving a partial name needs a registry (partial.ts's
  * `compileWithPartials`), which this function has no way to accept.
+ *
+ * Also rejects (same error type) a template containing a `{{{raw ...}}}`
+ * tag when `options.audit` is not supplied — see the module doc's "Raw/
+ * unescaped output" section and {@link requireRawAudit}.
  */
-export function compileTemplate(source: string): Result<CompiledTemplate, ValidationError> {
+export function compileTemplate(
+  source: string,
+  options?: CompileOptions,
+): Result<CompiledTemplate, ValidationError> {
   const astResult = parseTemplate(source);
   if (!astResult.ok) {
     return astResult;
@@ -1021,5 +1198,9 @@ export function compileTemplate(source: string): Result<CompiledTemplate, Valida
       ),
     );
   }
-  return ok(compileResolvedNodes(astResult.value));
+  const rawAuditResult = requireRawAudit(astResult.value, options?.audit);
+  if (!rawAuditResult.ok) {
+    return rawAuditResult;
+  }
+  return ok(compileResolvedNodes(astResult.value, options?.audit));
 }
