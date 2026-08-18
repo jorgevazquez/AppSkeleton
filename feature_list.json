@@ -876,7 +876,7 @@
       "Write a test asserting an allowed origin gets CORS headers and a disallowed origin does not"
     ],
     "depends_on": [58],
-    "passes": false
+    "passes": true
   },
   {
     "id": 69,

@@ -1249,3 +1249,24 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - genReqId always server-generates a UUID; Fastify's requestIdHeader option (which would trust a client-supplied request-id header) is deliberately left unset/false, so a client can never inject/spoof the id that ends up correlated across logs and the response header.
 - onSend (not onRequest, unlike session.ts/csrf.ts's hooks) was chosen for the header-echo hook specifically so it still fires on error-handler and not-found responses, not just the happy path — verified by the 'error response' test.
 - If a future feature needs the DB integration suite green, the schema_migrations-table / schema_seeds-table stale-state issue (Docker MySQL volume outliving individual feature sessions) is worth fixing at the docker-compose/init.sh level — flagged again here since it surfaced during this session's baseline run too.
+
+---
+
+## 2026-08-18 09:25 — Feature #68: Configurable CORS allow-list
+
+### What was done:
+- Added src/plugins/api-gateway/src/cors-config.ts: CorsConfigSchema/loadCorsConfig() parsing CORS_ORIGIN (comma-separated, whitespace-trimmed, empty entries dropped) into a string[] allow-list, defaulting to [] (empty = deny all cross-origin by default), reusing core/config.ts's loadConfig() layering like rate-limit-config.ts/security-headers-config.ts.
+- Added src/plugins/api-gateway/src/cors.ts: registerCors(app, config) wires @fastify/cors with a custom origin() callback — allow-listed Origin is reflected back (callback(null, true)), an unlisted Origin gets no Access-Control-Allow-Origin header at all (callback(null, false)), and requests with no Origin header (curl, server-to-server, same-origin) pass through untouched.
+- Wired registerCors() into api-gateway/index.ts's buildApp(), awaited before any route is registered (same onRoute-hook-timing requirement as registerRateLimiting/registerSecurityHeaders), and re-exported CorsConfigSchema/loadCorsConfig/CorsConfig/registerCors from the plugin's index.ts for consuming plugins/tests.
+- CORS_ORIGIN was already present in .env.example (from an earlier feature's env-var scaffolding) but previously unused; no changes needed there.
+
+### Testing:
+- Added tests/plugins/api-gateway/cors-config.test.ts: defaults, single-origin, comma-separated multi-origin, whitespace trimming/empty-entry dropping, empty-string -> [] (not [""]).
+- Added tests/plugins/api-gateway/cors.test.ts (standalone Fastify instance, mirroring security-headers.test.ts's pattern): allow-listed origin gets Access-Control-Allow-Origin reflected on both a plain GET and a preflight OPTIONS request, and on /health too; a disallowed origin gets no CORS header (200 still returned — CORS is a browser-side enforcement, not a server-side rejection); an empty/default CORS_ORIGIN denies every origin; a request with no Origin header at all passes through with no CORS header added.
+- Ran the full suite (npx vitest run): 1109/1115 passing; the only failures are 6 pre-existing database-mysql migration integration tests unrelated to this feature (confirmed via git stash — same 6 tests fail identically on the pre-CORS tree, due to stale MySQL container migration-table state, not this change).
+- npm run lint and npm run build both clean with no errors.
+
+### Notes:
+- CORS_ORIGIN is intentionally comma-separated exact-origin strings (scheme+host+port), not a wildcard/regex — keeps the allow-list auditable and matches the 'deny by default' requirement literally (an empty list denies everything, including once CORS_ORIGIN is unset).
+- 'Deny' here means omitting Access-Control-Allow-Origin, not rejecting the request server-side — the route handler still runs and returns 200; only a browser enforcing CORS client-side treats the missing header as a block. This matches @fastify/cors's own semantics and how security-headers.ts/rate-limit.ts already document their equivalent onRoute-hook-timing constraints.
+- registerCors() must be awaited before any route registration, same as registerRateLimiting/registerSecurityHeaders (all three add an onRoute hook via fastify-plugin at root encapsulation) — placed it in buildApp() right after registerSecurityHeaders and before registerSessionCookies.
