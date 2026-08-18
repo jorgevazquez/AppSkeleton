@@ -323,7 +323,7 @@ export async function bootstrapKernel(options: BootstrapKernelOptions = {}): Pro
 
   const definitions = await discoverPluginDefinitions(pluginsRoot, logger);
 
-  const loadResult = await loadPlugins(definitions, broker, { logger });
+  const loadResult = await loadPlugins(definitions, broker, { logger, auditSink });
   if (isErr(loadResult)) {
     throw loadResult.error;
   }
