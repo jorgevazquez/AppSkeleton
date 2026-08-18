@@ -33,18 +33,22 @@
  *
  * This module does not touch `rbac/index.ts`'s `check()`/`policyStore` —
  * making `check()` read the database on every call would be a real,
- * per-request I/O cost with no caching in front of it yet (feature #35,
- * "Policy decision caching with invalidation on role/permission change",
- * hasn't landed), and `check()`'s current synchronous signature is a public
- * contract `tests/plugins/rbac/index.test.ts` and
+ * per-request I/O cost, and `check()`'s current synchronous signature is a
+ * public contract `tests/plugins/rbac/index.test.ts` and
  * `check-capability.integration.test.ts` (feature #39, already passing)
- * depend on. {@link loadPolicyStore} below produces exactly the
- * `PolicyStore` shape `policy.ts`'s `can()` already consumes — unchanged,
- * per that module's own doc comment ("`can()` itself never changes, since
- * it only ever reads the two association arrays it's handed") — so a
- * future feature (#35's cache warm-up, or #36's management API) can call
- * `loadPolicyStore()` once and feed the result into `can()`, or hydrate
- * `policyStore`'s arrays from it, without this module needing to change.
+ * depend on. (Feature #35, "Policy decision caching with invalidation on
+ * role/permission change", has since layered an in-process, short-TTL
+ * cache in front of `check()`'s existing in-memory `policyStore` reads —
+ * see that module's docs — but that is orthogonal to this module: it
+ * caches `can()` decisions, not `db:query` I/O, and this module's own
+ * `loadPolicyStore` below is not yet the thing `check()` reads from.)
+ * {@link loadPolicyStore} below produces exactly the `PolicyStore` shape
+ * `policy.ts`'s `can()` already consumes — unchanged, per that module's own
+ * doc comment ("`can()` itself never changes, since it only ever reads the
+ * two association arrays it's handed") — so a future feature wiring this
+ * module's DB-backed store up to `check()` can call `loadPolicyStore()`
+ * once and feed the result into `can()`, or hydrate `policyStore`'s arrays
+ * from it, without this module needing to change.
  * Role/permission *management* semantics (duplicate-name rejection,
  * "assign a nonexistent permission" validation, an `rbac:manage`
  * authorization gate) are feature #36's job, not this one's — this layer
