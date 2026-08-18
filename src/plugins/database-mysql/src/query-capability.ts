@@ -76,11 +76,35 @@
  * entire purpose is to report the database's *current* reachability, so
  * retrying-until-success here would hide the very condition it exists to
  * surface.
+ *
+ * ## Slow query logging & basic metrics (feature #26)
+ *
+ * {@link DbQueryCapability.getMetrics} is a synchronous, zero-arg method
+ * (deliberately not async — reading three in-memory counters needs no I/O)
+ * exposing the same `{ queryCount, errorCount, averageDurationMs }`
+ * counters `core/introspect.ts`'s kernel introspection report picks up via
+ * structural duck-typing (mirroring how `healthCheck()` above is picked up
+ * for per-plugin health). It just proxies to a {@link QueryMetricsRecorder}
+ * — see `query-metrics.ts` for where the counters actually come from
+ * (Kysely's own `log` hook, wired in by whoever constructs this plugin's
+ * shared `Kysely<Database>` instance via `db.ts`'s `createKyselyDb()`).
+ * `createDbQueryCapability` does not itself execute queries against a
+ * recorder of its own here; passing the *same* recorder instance to both
+ * `createKyselyDb({ log: createSlowQueryLogger({ metrics, ... }) })` and
+ * `createDbQueryCapability(db, { metrics })` is what makes `getMetrics()`
+ * reflect real traffic. Omitting `metrics` entirely still returns a valid,
+ * all-zero snapshot rather than throwing — there's simply nothing feeding
+ * it.
  */
 import { sql, type Kysely } from "kysely";
 import { DatabaseError, isAppError } from "../../../core/errors.js";
 import { isPoolExhaustedError, retryWithBackoff, type RetryOptions } from "./resilience.js";
 import type { Database } from "./db.js";
+import {
+  createQueryMetricsRecorder,
+  type QueryMetricsRecorder,
+  type QueryMetricsSnapshot,
+} from "./query-metrics.js";
 
 /**
  * Result of {@link DbQueryCapability.healthCheck}. Structurally matches the
@@ -109,12 +133,27 @@ export interface DbQueryCapability {
    * answered. Never rejects — see this module's "Health check" docs.
    */
   healthCheck(): Promise<DbHealthCheckResult>;
+  /**
+   * The basic query performance counters accumulated so far — see this
+   * module's "Slow query logging & basic metrics" docs. Synchronous, and
+   * never throws.
+   */
+  getMetrics(): QueryMetricsSnapshot;
 }
 
-/** Options controlling {@link createDbQueryCapability}'s feature #23 retry-on-transient-connection-error behavior. */
+/** Options controlling {@link createDbQueryCapability}'s feature #23 retry-on-transient-connection-error behavior and feature #26 metrics. */
 export interface DbQueryCapabilityOptions {
   /** Overrides for the mid-session retry/backoff policy. See resilience.ts's `RetryOptions`. */
   retry?: RetryOptions;
+  /**
+   * The recorder {@link DbQueryCapability.getMetrics} reads from. Share
+   * this exact instance with `db.ts`'s `createKyselyDb({ log: ... })` (via
+   * `query-metrics.ts`'s `createSlowQueryLogger()`) so it actually
+   * accumulates real query traffic — see this module's "Slow query
+   * logging & basic metrics" docs. Defaults to a fresh, disconnected
+   * recorder (an all-zero snapshot forever) when omitted.
+   */
+  metrics?: QueryMetricsRecorder;
 }
 
 /** Human-readable detail from an unknown thrown value, safe to embed in a `DatabaseError`'s internal `message`. */
@@ -130,6 +169,7 @@ export function createDbQueryCapability(
   db: Kysely<Database>,
   options: DbQueryCapabilityOptions = {},
 ): DbQueryCapability {
+  const metrics = options.metrics ?? createQueryMetricsRecorder();
   return {
     async query<T>(fn: (db: Kysely<Database>) => Promise<T>): Promise<T> {
       try {
@@ -155,6 +195,9 @@ export function createDbQueryCapability(
       } catch (cause) {
         return { healthy: false, error: describeError(cause) };
       }
+    },
+    getMetrics(): QueryMetricsSnapshot {
+      return metrics.snapshot();
     },
   };
 }

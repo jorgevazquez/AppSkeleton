@@ -59,4 +59,15 @@ describe("createKyselyDb — pure construction over an existing mysql2 pool", ()
     const compiled = db.selectFrom("scratch").selectAll().compile();
     expect(compiled.sql).toContain("select * from `scratch`");
   });
+
+  it("accepts an optional `log` hook (feature #26) without altering the returned instance's shape", () => {
+    pool = createDbPool(BASE_CONFIG);
+    const log = () => undefined;
+    db = createKyselyDb(pool, { log });
+    expect(db).toBeInstanceOf(Kysely);
+    // Wiring `log` must not itself open a connection either — same
+    // construction-is-lazy guarantee as the no-options case above.
+    const compiled = db.selectFrom("scratch").selectAll().compile();
+    expect(compiled.sql).toContain("select * from `scratch`");
+  });
 });

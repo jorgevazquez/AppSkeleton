@@ -65,6 +65,24 @@
  * rest of the report which is derived from already-known in-memory state —
  * so this is a separate, additive async function rather than a breaking
  * change to the existing sync API every current caller/test relies on.
+ *
+ * ## Basic query performance metrics (feature #26)
+ *
+ * `metrics` is folded directly into {@link introspectKernel}'s own
+ * synchronous report — unlike `health` above, it needs no separate async
+ * variant, because reading a capability's counters is just reading
+ * already-accumulated in-memory numbers, never a live network probe. Any
+ * capability a plugin provides whose implementation exposes a zero-arg,
+ * synchronous `getMetrics(): { queryCount, errorCount, averageDurationMs }`
+ * (see {@link MetricsCapability}) is picked up the same duck-typed way
+ * `health` picks up `healthCheck()` — structurally, with no import of or
+ * special-case for `database-mysql`'s `db:query` capability (see
+ * `query-capability.ts`'s `DbQueryCapability.getMetrics`), which is simply
+ * the first capability to implement it. A plugin providing more than one
+ * metrics-capable capability gets one combined snapshot: counts summed,
+ * and the average duration recomputed as a count-weighted mean across all
+ * of them (not a plain average of averages, which would under-weight a
+ * capability that handled far more queries than another).
  */
 import type { CapabilityBroker } from "./broker.js";
 import type { FailedPlugin, LoadedPlugin, PluginLoadResult } from "./loader.js";
@@ -97,6 +115,15 @@ export interface PluginIntrospectionReport {
    * report on.
    */
   readonly health?: PluginHealthReport;
+  /**
+   * Present only when at least one capability this plugin provides exposes
+   * a metrics-capable `getMetrics()` — see this module's "Basic query
+   * performance metrics" docs and {@link MetricsCapability}. Unlike
+   * `health`, this is populated by the plain, synchronous
+   * {@link introspectKernel} itself (no `WithHealth`-style async variant
+   * needed) and is absent for a `failed` plugin, same as `health`.
+   */
+  readonly metrics?: CapabilityMetricsSnapshot;
 }
 
 /** `"unhealthy"` if any health-checkable capability a plugin provides reported unhealthy (or threw); `"healthy"` only if every one of them reported healthy. */
@@ -122,6 +149,29 @@ export interface HealthCheckableCapability {
   healthCheck(): Promise<{ readonly healthy: boolean; readonly error?: string }>;
 }
 
+/** A capability's basic query performance counters — see {@link MetricsCapability} and this module's "Basic query performance metrics" docs. */
+export interface CapabilityMetricsSnapshot {
+  readonly queryCount: number;
+  readonly errorCount: number;
+  readonly averageDurationMs: number;
+}
+
+/**
+ * The structural protocol (feature #26) a provided capability's
+ * implementation can opt into for per-plugin performance-counter
+ * reporting: a zero-arg, synchronous `getMetrics()` returning
+ * `{ queryCount, errorCount, averageDurationMs }`. `database-mysql`'s
+ * `db:query` capability implements this (see `query-capability.ts`'s
+ * `DbQueryCapability.getMetrics`), but nothing here is specific to it —
+ * any capability implementation with a matching `getMetrics` method is
+ * picked up the same way, duck-typed rather than imported. Synchronous
+ * (unlike {@link HealthCheckableCapability.healthCheck}) because reading
+ * already-accumulated in-memory counters needs no I/O.
+ */
+export interface MetricsCapability {
+  getMetrics(): CapabilityMetricsSnapshot;
+}
+
 /** Full kernel introspection report: one entry per plugin plus a status-count summary. */
 export interface KernelIntrospectionReport {
   readonly plugins: readonly PluginIntrospectionReport[];
@@ -141,17 +191,76 @@ function grantedCapabilities(
   return requires.filter((capabilityId) => broker.isGranted(pluginId, capabilityId));
 }
 
+/** Structural check for {@link MetricsCapability} — a `getMetrics` function on an object, nothing more. */
+function isMetricsCapable(value: unknown): value is MetricsCapability {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "getMetrics" in value &&
+    typeof (value as { getMetrics: unknown }).getMetrics === "function"
+  );
+}
+
+/**
+ * Fold multiple capabilities' {@link CapabilityMetricsSnapshot}s into one:
+ * counts summed, average duration recomputed as a count-weighted mean (see
+ * this module's "Basic query performance metrics" docs for why — a plain
+ * average of averages would under-weight a capability that handled far
+ * more queries than another).
+ */
+function foldCapabilityMetrics(
+  snapshots: readonly CapabilityMetricsSnapshot[],
+): CapabilityMetricsSnapshot | undefined {
+  if (snapshots.length === 0) {
+    return undefined;
+  }
+
+  const queryCount = snapshots.reduce((sum, snapshot) => sum + snapshot.queryCount, 0);
+  const errorCount = snapshots.reduce((sum, snapshot) => sum + snapshot.errorCount, 0);
+  const totalDurationMs = snapshots.reduce(
+    (sum, snapshot) => sum + snapshot.averageDurationMs * snapshot.queryCount,
+    0,
+  );
+
+  return {
+    queryCount,
+    errorCount,
+    averageDurationMs: queryCount === 0 ? 0 : totalDurationMs / queryCount,
+  };
+}
+
+/**
+ * Read and fold every metrics-capable capability `module.provides`
+ * exposes into one {@link CapabilityMetricsSnapshot}, or `undefined` if
+ * none of them are metrics-capable. Synchronous and never throws — unlike
+ * {@link healthForModule}, `getMetrics()` is defined to be a plain,
+ * synchronous read of in-memory counters, so there is no rejection path to
+ * guard against here.
+ */
+function metricsForModule(
+  provides: Readonly<Record<string, unknown>> | undefined,
+): CapabilityMetricsSnapshot | undefined {
+  const capable = Object.values(provides ?? {}).filter(isMetricsCapable);
+  if (capable.length === 0) {
+    return undefined;
+  }
+
+  return foldCapabilityMetrics(capable.map((capability) => capability.getMetrics()));
+}
+
 function reportLoaded(
   plugin: LoadedPlugin,
   broker: CapabilityBroker,
   disabled: boolean,
 ): PluginIntrospectionReport {
   const { provides, requires } = plugin.manifest.capabilities;
+  const metrics = metricsForModule(plugin.module.provides);
   return {
     id: plugin.id,
     version: plugin.manifest.version,
     status: disabled ? "disabled" : "loaded",
     capabilities: { provides, requires, granted: grantedCapabilities(plugin.id, requires, broker) },
+    ...(metrics ? { metrics } : {}),
   };
 }
 
@@ -307,6 +416,13 @@ export function formatIntrospectionReport(report: KernelIntrospectionReport): st
     if (plugin.health) {
       const suffix = plugin.health.error !== undefined ? ` (${plugin.health.error})` : "";
       lines.push(`  health:   ${plugin.health.status}${suffix}`);
+    }
+    if (plugin.metrics) {
+      lines.push(
+        `  metrics:  ${String(plugin.metrics.queryCount)} queries, ` +
+          `${String(plugin.metrics.errorCount)} errors, ` +
+          `${plugin.metrics.averageDurationMs.toFixed(1)}ms avg`,
+      );
     }
     if (plugin.status === "failed") {
       lines.push(`  error:    ${plugin.error ?? "unknown error"}`);

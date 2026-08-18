@@ -335,7 +335,7 @@
       "Write a test asserting a deliberately slow query is logged and counted"
     ],
     "depends_on": [20],
-    "passes": false
+    "passes": true
   },
   {
     "id": 27,

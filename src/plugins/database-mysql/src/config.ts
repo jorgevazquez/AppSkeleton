@@ -48,6 +48,22 @@
  *                             queue (and therefore an observable
  *                             exhaustion error instead of ever-growing wait
  *                             times) by setting it explicitly.
+ *   - `DB_SLOW_QUERY_THRESHOLD_MS` — feature #26 ("Slow query logging and
+ *                             basic query performance metrics"): the
+ *                             minimum query duration, in milliseconds,
+ *                             that triggers a slow-query log line (see
+ *                             `query-metrics.ts`'s `createSlowQueryLogger()`).
+ *                             Optional and unset by default — same shape
+ *                             as `DB_POOL_QUEUE_LIMIT` above — so an
+ *                             existing deployment/test fixture that never
+ *                             set it keeps compiling and behaving exactly
+ *                             as before; `query-metrics.ts`'s
+ *                             `DEFAULT_SLOW_QUERY_THRESHOLD_MS` (200ms) is
+ *                             what actually applies when it's left unset,
+ *                             generous enough that a normal, well-indexed
+ *                             query never trips it but low enough to
+ *                             surface a genuinely slow one without any
+ *                             operator configuration at all.
  */
 import { z } from "zod";
 import { loadConfig, type LoadConfigOptions } from "../../../core/config.js";
@@ -73,6 +89,7 @@ export const DbConfigSchema = z.object({
   DB_SSL_CA: z.string().min(1, "must not be empty").optional(),
   DB_SSL_REJECT_UNAUTHORIZED: booleanFromEnv.default(true),
   DB_POOL_QUEUE_LIMIT: z.coerce.number().int("must be an integer").min(0).optional(),
+  DB_SLOW_QUERY_THRESHOLD_MS: z.coerce.number().int("must be an integer").min(0).optional(),
 });
 
 export type DbConfig = z.infer<typeof DbConfigSchema>;

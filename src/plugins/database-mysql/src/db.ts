@@ -19,7 +19,7 @@
  * lower-level mysql2 use (health checks, the future migration runner) share
  * one connection budget, not two independent ones.
  */
-import { Kysely, MysqlDialect } from "kysely";
+import { Kysely, MysqlDialect, type KyselyConfig } from "kysely";
 import type { Pool } from "mysql2/promise";
 
 /**
@@ -46,6 +46,21 @@ export interface Database {
   [table: string]: Record<string, unknown>;
 }
 
+export interface CreateKyselyDbOptions {
+  /**
+   * Kysely's own per-query `log` hook (feature #26 — "Slow query logging
+   * and basic query performance metrics"): fired once per compiled
+   * statement with its SQL text, bound parameters, and duration. Typically
+   * built via `query-metrics.ts`'s `createSlowQueryLogger()` rather than
+   * supplied by hand — see that module's docs for why instrumentation
+   * lives here (at the shared Kysely instance) rather than inside
+   * `query-capability.ts`'s `query()` wrapper. Omitted by default, in
+   * which case Kysely logs nothing (matches Kysely's own `log`-unset
+   * default).
+   */
+  log?: KyselyConfig["log"];
+}
+
 /**
  * Build a `Kysely<Database>` instance over an already-constructed mysql2
  * connection pool (see `createDbPool()`/`createDbPoolFromEnv()` in
@@ -53,8 +68,9 @@ export interface Database {
  * connection eagerly — Kysely's `MysqlDriver` acquires connections lazily,
  * on first query.
  */
-export function createKyselyDb(pool: Pool): Kysely<Database> {
+export function createKyselyDb(pool: Pool, options: CreateKyselyDbOptions = {}): Kysely<Database> {
   return new Kysely<Database>({
     dialect: new MysqlDialect({ pool: pool.pool }),
+    ...(options.log ? { log: options.log } : {}),
   });
 }

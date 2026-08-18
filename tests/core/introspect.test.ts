@@ -289,6 +289,27 @@ describe("formatIntrospectionReport", () => {
     expect(text).toContain("(no plugins loaded)");
     expect(text).toContain("Summary: 0 total — 0 loaded, 0 failed, 0 disabled.");
   });
+
+  it("renders a metrics-capable plugin's query count, error count, and average duration (feature #26)", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("database-mysql", { provides: ["db:query"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": {
+              getMetrics: () => ({ queryCount: 5, errorCount: 1, averageDurationMs: 12.34 }),
+            },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const text = formatIntrospectionReport(introspectKernel(result, broker));
+
+    expect(text).toContain("metrics:  5 queries, 1 errors, 12.3ms avg");
+  });
 });
 
 describe("introspectKernelWithHealth (feature #24 — database health check integrated into kernel introspection)", () => {
@@ -437,7 +458,7 @@ describe("introspectKernelWithHealth (feature #24 — database health check inte
     expect(report.plugins.find((p) => p.id === "multi")?.health?.status).toBe("unhealthy");
   });
 
-  it("does not mutate or otherwise alter the plain introspectKernel() report for an unrelated call", async () => {
+  it("does not mutate or otherwise alter the plain introspectKernel() report for an unrelated call [health]", async () => {
     const broker = createCapabilityBroker();
     const definitions: PluginDefinition[] = [
       {
@@ -454,5 +475,117 @@ describe("introspectKernelWithHealth (feature #24 — database health check inte
     const plainReport = introspectKernel(result, broker);
     expect(plainReport.plugins[0]?.health).toBeUndefined();
     expect("health" in (plainReport.plugins[0] ?? {})).toBe(false);
+  });
+});
+
+describe("introspectKernel — basic query performance metrics (feature #26)", () => {
+  it("reports a metrics-capable capability's queryCount/errorCount/averageDurationMs on the plain, synchronous report", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("database-mysql", { provides: ["db:query"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": {
+              getMetrics: () => ({ queryCount: 42, errorCount: 3, averageDurationMs: 12.5 }),
+            },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    // No `introspectKernelWithHealth`-style async wrapper needed — see
+    // this module's "Basic query performance metrics" docs for why.
+    const report = introspectKernel(result, broker);
+
+    expect(report.plugins.find((p) => p.id === "database-mysql")?.metrics).toEqual({
+      queryCount: 42,
+      errorCount: 3,
+      averageDurationMs: 12.5,
+    });
+  });
+
+  it("omits the metrics field entirely for a plugin that provides no metrics-capable capability", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("html-renderer", { provides: ["render:template"] }),
+        module: moduleFixture({ provides: { "render:template": () => "<html></html>" } }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = introspectKernel(result, broker);
+
+    const plugin = report.plugins.find((p) => p.id === "html-renderer");
+    expect(plugin).toBeDefined();
+    expect(plugin?.metrics).toBeUndefined();
+    expect("metrics" in (plugin ?? {})).toBe(false);
+  });
+
+  it("leaves a failed plugin's report untouched — no metrics field, since there is no live module to read counters from", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("broken"),
+        module: moduleFixture({
+          onInstall: () => {
+            throw new Error("boom");
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = introspectKernel(result, broker);
+
+    const broken = report.plugins.find((p) => p.id === "broken");
+    expect(broken?.status).toBe("failed");
+    expect(broken?.metrics).toBeUndefined();
+  });
+
+  it("combines multiple metrics-capable capabilities a plugin provides into one count-weighted snapshot", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("multi", { provides: ["db:query", "cache:get"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": {
+              getMetrics: () => ({ queryCount: 8, errorCount: 2, averageDurationMs: 10 }),
+            },
+            "cache:get": {
+              getMetrics: () => ({ queryCount: 2, errorCount: 0, averageDurationMs: 100 }),
+            },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = introspectKernel(result, broker);
+
+    // queryCount: 8 + 2 = 10; errorCount: 2 + 0 = 2;
+    // averageDurationMs: (8*10 + 2*100) / 10 = 28 — a count-weighted mean,
+    // not a plain average of the two averages (which would give 55).
+    expect(report.plugins.find((p) => p.id === "multi")?.metrics).toEqual({
+      queryCount: 10,
+      errorCount: 2,
+      averageDurationMs: 28,
+    });
+  });
+
+  it("does not mutate or otherwise alter the plain introspectKernel() report for an unrelated call [metrics omitted]", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      { manifest: manifest("leaf"), module: moduleFixture() },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = introspectKernel(result, broker);
+
+    expect(report.plugins[0]?.metrics).toBeUndefined();
+    expect("metrics" in (report.plugins[0] ?? {})).toBe(false);
   });
 });
