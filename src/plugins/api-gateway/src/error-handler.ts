@@ -1,7 +1,8 @@
 /**
  * Uniform 4xx (and 5xx) error envelope for the api-gateway-owned Fastify
  * instance (feature #60 — "Request validation and a consistent 4xx error
- * envelope").
+ * envelope" — and feature #61 — "Centralized error handler with a
+ * consistent envelope and no stack-trace leaks in production").
  *
  * spec.md frames api-gateway as providing "request validation, consistent
  * error envelopes" over raw Fastify — this module is where that promise is
@@ -20,12 +21,33 @@
  *      `AppError#toJSON()`.
  *   3. No route matches at all (404) — Fastify's default not-found handler
  *      replies with yet another ad hoc shape.
+ *   4. A route handler throws something that is *not* an `AppError` at all
+ *      (a plain `Error`, a thrown string, a bug) — the genuinely
+ *      "unexpected" case feature #61 is about. Without a custom handler,
+ *      Fastify would serialize that raw error (message + stack) straight
+ *      onto the wire, which is exactly the internal-detail leak spec.md's
+ *      Error Isolation requirement forbids.
  *
- * `registerErrorHandling(app)` wires one `setErrorHandler` (case 1 & 2) and
- * one `setNotFoundHandler` (case 3) so every one of these collapses to the
- * exact same `{code, message, details?}` envelope every other AppError
+ * `registerErrorHandling(app)` wires one `setErrorHandler` (cases 1, 2 & 4)
+ * and one `setNotFoundHandler` (case 3) so every one of these collapses to
+ * the exact same `{code, message, details?}` envelope every other AppError
  * already produces, via `AppError#toJSON()` / `toErrorEnvelope()`.
+ *
+ * ## No stack-trace leaks in production (feature #61)
+ *
+ * Case 4 (an unexpected, non-`AppError` failure) is always logged with full
+ * detail (`request.log.error({ err: error }, ...)`) — the logger's own
+ * secret redaction (`logger.ts`, feature #3) already makes this safe at any
+ * `NODE_ENV`, and an operator needs the real message/stack to debug it. The
+ * HTTP *response* body is a different trust boundary: `toErrorEnvelope()`'s
+ * `message` is always the generic `"An unexpected error occurred."` in
+ * *every* environment (the raw internal message is never echoed back to a
+ * client, production or not) — the only thing environment-gated is whether
+ * `stack` is attached at all, via `includeStack: nodeEnv !== "production"`,
+ * purely as a local-debugging convenience for `development`/`test`. See
+ * {@link RegisterErrorHandlingOptions.nodeEnv}.
  */
+import type { CoreConfig } from "../../../core/config.js";
 import {
   NotFoundError,
   ValidationError,
@@ -109,6 +131,38 @@ function toGenericClientErrorEnvelope(error: unknown) {
   };
 }
 
+export interface RegisterErrorHandlingOptions {
+  /**
+   * Which runtime environment this Fastify instance is serving — governs
+   * only whether an *unexpected* (non-`AppError`) error's response body may
+   * include a stack trace for local debugging (`stack` is attached outside
+   * `"production"`); the response `message`/`code` never change with
+   * environment, and `AppError` responses are entirely unaffected (their
+   * `publicMessage` is already safe by construction — see `errors.ts`).
+   *
+   * Defaults to `process.env.NODE_ENV`, falling back to `"development"` to
+   * match `config.ts`'s `CoreConfigSchema` default — mirrors how
+   * `bootstrapKernel()` defaults its own `env` option to `process.env`
+   * (`src/server/index.ts`). Plugin lifecycle hooks are not currently handed
+   * the kernel's resolved `CoreConfig` (`PluginLifecycleContext` only
+   * carries `manifest`/`capabilities`/`logger` — see `loader.ts`), so this
+   * reads the ambient env directly rather than threading config through the
+   * loader; an explicit override is accepted precisely so tests never have
+   * to depend on ambient process state (see `error-handler.test.ts`).
+   */
+  nodeEnv?: CoreConfig["NODE_ENV"];
+}
+
+function resolveNodeEnv(nodeEnv: CoreConfig["NODE_ENV"] | undefined): CoreConfig["NODE_ENV"] {
+  if (nodeEnv !== undefined) {
+    return nodeEnv;
+  }
+  const fromEnv = process.env["NODE_ENV"];
+  return fromEnv === "production" || fromEnv === "test" || fromEnv === "development"
+    ? fromEnv
+    : "development";
+}
+
 /**
  * Wire the uniform error/not-found envelope onto `app` (see module docs).
  * Called once from `buildApp()` in `../index.ts`, right after the instance
@@ -116,7 +170,13 @@ function toGenericClientErrorEnvelope(error: unknown) {
  * every route this plugin or a consumer registers is covered from the
  * start.
  */
-export function registerErrorHandling(app: ApiGatewayApp): void {
+export function registerErrorHandling(
+  app: ApiGatewayApp,
+  options: RegisterErrorHandlingOptions = {},
+): void {
+  const nodeEnv = resolveNodeEnv(options.nodeEnv);
+  const isProduction = nodeEnv === "production";
+
   app.setErrorHandler((error, request, reply) => {
     if (isAppError(error)) {
       reply.status(error.statusCode).send(error.toJSON());
@@ -135,8 +195,17 @@ export function registerErrorHandling(app: ApiGatewayApp): void {
       return;
     }
 
+    // Unexpected (non-AppError) failure. Always logged with full detail —
+    // logger.ts's secret redaction (feature #3) already makes this safe at
+    // any NODE_ENV, and an operator needs the real message/stack to debug
+    // it — but the HTTP response only ever gets a generic body in
+    // production; outside production a stack trace is attached purely as a
+    // local-debugging convenience. The response `message` itself is
+    // ALWAYS the generic "An unexpected error occurred." — toErrorEnvelope()
+    // never echoes the raw internal message back to a client, in any
+    // environment (see its own docs in errors.ts).
     request.log.error({ err: error }, "Unhandled error while processing request.");
-    reply.status(statusCode).send(toErrorEnvelope(error));
+    reply.status(statusCode).send(toErrorEnvelope(error, { includeStack: !isProduction }));
   });
 
   app.setNotFoundHandler((request, reply) => {
