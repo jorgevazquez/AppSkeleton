@@ -364,6 +364,16 @@ function walk(
         // No literal text of its own to scan, and never survives into the tree
         // compileResolvedNodes actually compiles (see template.ts).
         break;
+      case "partial":
+        // No literal text of its own to scan here: a partial's *output* could contain arbitrary
+        // HTML structure, but what that output actually is isn't known until render time (it
+        // depends on a registry lookup, and possibly on recursive self-reference) — nothing this
+        // compile-time scanner could inspect. Its own body is escape-context-scanned separately,
+        // starting fresh from plain HTML-text state, by compilePartialBody (see template.ts's
+        // "Partials/components" doc section for why that's the best a static scanner can do
+        // across a component-call boundary). So scanning of *this* template's siblings continues
+        // unaffected, exactly as if the tag weren't there.
+        break;
     }
   }
 }

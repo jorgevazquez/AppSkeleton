@@ -185,6 +185,29 @@ export class MigrationError extends AppError {
   }
 }
 
+/**
+ * The html-renderer template engine (feature #49 — partials/components)
+ * failed while actually rendering a compiled template: a `{{> partial}}`
+ * tag named a partial that isn't in the registry passed to
+ * `compileWithPartials`, a referenced partial's own source failed to
+ * parse, or a chain of partial inclusions (typically one that includes
+ * itself, directly or transitively, without a terminating condition) blew
+ * past the engine's max recursion depth. Thrown from
+ * `CompiledTemplate.render()`, never returned as a `Result`, because these
+ * are render-time (data- and registry-dependent) conditions — every other
+ * template error (a malformed `{{tag}}`, an unresolvable `{{extends}}`
+ * layout, ...) is instead caught by compile-time validation before
+ * `render()` is ever reachable, and stays on the `Result` convention.
+ */
+export class RenderError extends AppError {
+  readonly code = "RENDER_ERROR";
+  readonly statusCode = 500;
+
+  protected override defaultPublicMessage(): string {
+    return "A template failed to render.";
+  }
+}
+
 /** Narrow an unknown thrown value down to the AppError taxonomy. */
 export function isAppError(error: unknown): error is AppError {
   return error instanceof AppError;
