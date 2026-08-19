@@ -47,17 +47,20 @@ describe("api-gateway plugin manifest", () => {
     }
   });
 
-  it("declares rbac:check and render:template as required capabilities it may consume", async () => {
+  it("declares rbac:check, render:template, and html:error-pages as required capabilities it may consume", async () => {
     const { entries } = await scanPluginDirectories(PLUGINS_ROOT);
     const entry = entries.find((candidate) => candidate.name === "api-gateway");
     const result = validateManifest(entry?.manifest);
 
     expect(isOk(result)).toBe(true);
     if (isOk(result)) {
+      // html:error-pages (feature #116) joined render:template here once
+      // ./src/error-handler.ts started consuming it (best-effort, see that
+      // module's own docs) for the styled 404/500 pages.
       expect(result.value.capabilities.requires).toEqual(
-        expect.arrayContaining(["rbac:check", "render:template"]),
+        expect.arrayContaining(["rbac:check", "render:template", "html:error-pages"]),
       );
-      expect(result.value.capabilities.requires).toHaveLength(2);
+      expect(result.value.capabilities.requires).toHaveLength(3);
     }
   });
 
