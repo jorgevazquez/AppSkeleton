@@ -1,0 +1,10 @@
+{
+  "id": "great-plugin",
+  "version": "0.1.0",
+  "depends_on": {},
+  "capabilities": {
+    "provides": [],
+    "requires": []
+  },
+  "entry_point": "index.ts"
+}

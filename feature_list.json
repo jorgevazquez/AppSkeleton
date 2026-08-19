@@ -991,7 +991,7 @@
       "Write unit tests with a passing fixture and 3 failing fixtures (bad naming, undeclared capability use, forbidden import)"
     ],
     "depends_on": [74],
-    "passes": false
+    "passes": true
   },
   {
     "id": 78,
