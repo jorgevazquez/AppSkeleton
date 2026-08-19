@@ -978,7 +978,7 @@
       "Write a test invoking the CLI programmatically (non-interactive flags) and asserting correct output"
     ],
     "depends_on": [75],
-    "passes": false
+    "passes": true
   },
   {
     "id": 77,
