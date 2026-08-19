@@ -2050,3 +2050,23 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Followed the feature #74 (manifest JSON Schema export) precedent exactly: a pure render*() function, a checked-in generated file, and a vitest 'the checked-in file equals renderX() right now' test — that test already runs as part of npm test, which .github/workflows/ci.yml's required job runs, so no separate CI step was needed to satisfy 'wire it to run in CI and fail if stale'
 - Gotcha for future generators: any new generated Markdown/doc file must be added to .prettierignore, or lint-staged's prettier --write will re-align table columns on commit and break the drift test against the generator's raw (unaligned) output — discovered this the hard way after the first commit here
 - depends_on [74, 17, 31, 45, 57] were all already passing; reused core/registry.ts's scanPluginDirectories and core/manifest.ts's validateManifest rather than re-implementing manifest scanning
+
+---
+
+## 2026-08-18 23:59 — Feature #90: Diff view between two revisions
+
+### What was done:
+- Added compileDiffTemplate()/renderDiffToHtml() to src/plugins/wiki/src/diff.ts, mirroring markdown.ts's compileMarkdownTemplate/renderMarkdownToHtml 'data, not a raw string' pattern: builds an html-renderer template *source* out of fixed literal <div class="diff-line diff-{type}"> wrappers (never diffed content) plus one {{lineN}} placeholder per diffLines() result line, with each line's raw value routed through the TemplateContext, so feature #47's auto-escaping neutralizes any HTML/template-injection payload in diffed page content.
+- Wired the new renderer into the existing GET /wiki/pages/:id/diff route (src/plugins/wiki/index.ts): obtains render:template the same way the get route already does for Markdown, throws RenderError on failure, and now returns an additional html field alongside the existing lines edit-script array; extended DIFF_RESPONSE_SCHEMA accordingly.
+- Left diffLines() (feature #94's original LCS-based line diff) untouched.
+
+### Testing:
+- npx vitest run tests/plugins/wiki/diff.test.ts: added compileDiffTemplate unit tests (fixed-class-per-line output, 'never splices content into template source', empty-input case) alongside the existing diffLines cases (additions/deletions correctly identified for a known before/after pair, already present from feature #94).
+- npx vitest run tests/plugins/wiki/http-routes.integration.test.ts: extended the existing 'diff: identifies additions and deletions' case to also assert on the new html field's per-line divs, and added a new end-to-end case driving two real page edits (via the real capability broker + real MySQL) where one revision's content is a <script>/onerror XSS payload, asserting the rendered HTML never contains the raw tag/attribute and instead contains the HTML-escaped text.
+- npm run lint && npm run build: clean.
+- Full npx vitest run: 1627/1644 passing (was 1623 before this change, +4 new tests), same 11 pre-existing failures as the init.sh baseline, all in tests/plugins/database-mysql/migrator.integration.test.ts (unrelated to this feature — a checksum/missing-migration-file issue in that plugin, not touched here).
+
+### Notes:
+- Feature #94 already built diffLines() and a working (JSON-only) diff route; this feature's whole scope was step 2 (safe HTML rendering) plus extending the step-3 test coverage to the rendering/safety side, since diffLines()'s own additions/deletions test coverage already existed.
+- Followed markdown.ts's established precedent exactly rather than inventing a new safety approach — no hand-rolled escaping anywhere in diff.ts, all safety comes from html-renderer's existing render:template auto-escaping (feature #47).
+- DIFF_LINE_CLASS is a Record<DiffLineType, string> keyed off the closed DiffLineType union, so the per-line CSS class is always one of 3 fixed literals baked into diff.ts itself — never derived from diffed content — safe to splice directly into the template source string.
