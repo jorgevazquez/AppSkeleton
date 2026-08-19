@@ -69,3 +69,42 @@ export interface UpdatePageInput {
   readonly title?: string;
   readonly content?: string;
 }
+
+/**
+ * A page's minimal summary as attached to its namespace's node in the page
+ * tree (feature #91 — "Page tree / navigation sidebar reflecting namespace
+ * hierarchy"). Deliberately omits `content`/timestamps — a navigation
+ * sidebar entry only ever needs enough to link to the page
+ * (`namespaceId`/`slug`, from the enclosing {@link NamespaceTreeNode}, plus
+ * this page's own `slug`) and a human-readable label (`title`).
+ */
+export interface PageTreeEntry {
+  /** The {@link Page.id} this entry summarizes. */
+  readonly id: number;
+  /** URL-facing slug within the enclosing namespace — see {@link Page.slug}. */
+  readonly slug: string;
+  /** Human-readable page title. */
+  readonly title: string;
+}
+
+/**
+ * A namespace node within the nested page-tree / navigation-sidebar
+ * structure `page-tree.ts`'s `buildNamespaceTree` assembles (feature #91).
+ * Mirrors one `wiki_namespaces` row plus every page directly inside it;
+ * `children` holds every namespace whose `parent_id` is this node's `id`,
+ * nested recursively to whatever depth the namespace hierarchy actually
+ * has (feature #91 step 2 exercises a 3-level hierarchy, but nothing here
+ * bounds the depth).
+ */
+export interface NamespaceTreeNode {
+  /** The `wiki_namespaces.id` this node was built from. */
+  readonly id: string;
+  /** Human-readable namespace name. */
+  readonly name: string;
+  /** Optional namespace description, `null` when unset. */
+  readonly description: string | null;
+  /** Pages directly inside this namespace, sorted alphabetically by `slug`. */
+  readonly pages: readonly PageTreeEntry[];
+  /** Child namespaces, sorted alphabetically by `name`, each recursively built the same way. */
+  readonly children: readonly NamespaceTreeNode[];
+}
