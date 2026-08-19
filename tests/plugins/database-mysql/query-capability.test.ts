@@ -1,5 +1,6 @@
 import { Kysely, type LogEvent } from "kysely";
 import { describe, expect, it, vi } from "vitest";
+import type { Pool } from "mysql2/promise";
 import { DatabaseError, ValidationError } from "../../../src/core/errors.js";
 import type { Database } from "../../../src/plugins/database-mysql/src/db.js";
 import { createDbQueryCapability } from "../../../src/plugins/database-mysql/src/query-capability.js";
@@ -48,14 +49,21 @@ describe("createDbQueryCapability — db:query capability object", () => {
     expect(fn).toHaveBeenCalledWith(FAKE_DB);
   });
 
-  it("exposes only `query`, `healthCheck`, and `getMetrics` — no `query(sql, params)` string-accepting overload", () => {
+  it("exposes only `query`, `healthCheck`, `getMetrics`, and `getPoolMetrics` — no `query(sql, params)` string-accepting overload", () => {
     const capability = createDbQueryCapability(FAKE_DB);
-    // healthCheck (feature #24) and getMetrics (feature #26) are the only
-    // other public members — see this file's "healthCheck (feature #24)"
-    // and "getMetrics (feature #26)" describe blocks below. Neither accepts
-    // a raw SQL string either (both take no arguments at all), so neither
-    // reopens the "no raw interpolated SQL" gap this test guards.
-    expect(Object.keys(capability).sort()).toEqual(["getMetrics", "healthCheck", "query"]);
+    // healthCheck (feature #24), getMetrics (feature #26), and
+    // getPoolMetrics (feature #30) are the only other public members — see
+    // this file's "healthCheck (feature #24)", "getMetrics (feature #26)",
+    // and "getPoolMetrics (feature #30)" describe blocks below. None of
+    // them accept a raw SQL string either (all three take no arguments at
+    // all), so none reopens the "no raw interpolated SQL" gap this test
+    // guards.
+    expect(Object.keys(capability).sort()).toEqual([
+      "getMetrics",
+      "getPoolMetrics",
+      "healthCheck",
+      "query",
+    ]);
     expect(typeof capability.query).toBe("function");
     // The one and only public method takes exactly one argument (`fn`) —
     // there is no second `params`/`sql` parameter slot to smuggle a raw
@@ -242,5 +250,60 @@ describe("createDbQueryCapability — getMetrics (feature #26)", () => {
       errorCount: 1,
       averageDurationMs: 10,
     });
+  });
+});
+
+describe("createDbQueryCapability — getPoolMetrics (feature #30)", () => {
+  /** A fake mysql2 `Pool` — same shape pool-metrics.test.ts's own `fakePool()` builds. */
+  function fakePool(counts: { all?: number; free?: number; queued?: number }): Pool {
+    const { all = 0, free = 0, queued = 0 } = counts;
+    return {
+      pool: {
+        _allConnections: { length: all },
+        _freeConnections: { length: free },
+        _connectionQueue: { length: queued },
+      },
+    } as unknown as Pool;
+  }
+
+  it("takes no arguments and returns an all-zero snapshot when no pool is wired in", () => {
+    const capability = createDbQueryCapability(FAKE_DB);
+    expect(typeof capability.getPoolMetrics).toBe("function");
+    expect(capability.getPoolMetrics.length).toBe(0);
+    expect(capability.getPoolMetrics()).toEqual({ active: 0, idle: 0, queued: 0 });
+  });
+
+  it("reads live active/idle/queued counts off the pool instance passed in via options.pool", () => {
+    const pool = fakePool({ all: 5, free: 2, queued: 3 });
+    const capability = createDbQueryCapability(FAKE_DB, { pool });
+
+    expect(capability.getPoolMetrics()).toEqual({ active: 3, idle: 2, queued: 3 });
+  });
+
+  it("reflects the pool's *current* state on every call, not a snapshot frozen at construction time", async () => {
+    // Simulates a concurrent burst of queries checking connections out and
+    // back in over time — getPoolMetrics() has no internal cache of its
+    // own, so successive calls against the same pool must track it live.
+    const pool = fakePool({ all: 3, free: 3, queued: 0 });
+    const capability = createDbQueryCapability(FAKE_DB, { pool });
+    expect(capability.getPoolMetrics()).toEqual({ active: 0, idle: 3, queued: 0 });
+
+    // Mid-burst: every connection checked out, two more callers queued.
+    (
+      pool as unknown as { pool: { _freeConnections: { length: number } } }
+    ).pool._freeConnections.length = 0;
+    (
+      pool as unknown as { pool: { _connectionQueue: { length: number } } }
+    ).pool._connectionQueue.length = 2;
+    expect(capability.getPoolMetrics()).toEqual({ active: 3, idle: 0, queued: 2 });
+
+    // Burst drained: connections released back to idle, queue empty again.
+    (
+      pool as unknown as { pool: { _freeConnections: { length: number } } }
+    ).pool._freeConnections.length = 3;
+    (
+      pool as unknown as { pool: { _connectionQueue: { length: number } } }
+    ).pool._connectionQueue.length = 0;
+    expect(capability.getPoolMetrics()).toEqual({ active: 0, idle: 3, queued: 0 });
   });
 });

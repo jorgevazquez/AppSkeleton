@@ -387,7 +387,7 @@
       "Write a test asserting metrics update correctly under concurrent queries"
     ],
     "depends_on": [23, 24],
-    "passes": false
+    "passes": true
   },
   {
     "id": 31,

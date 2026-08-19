@@ -32,7 +32,11 @@
  *   checksum-verified runner (`migrator.ts`, feature #19) — so the audit
  *   log table exists by the time this plugin finishes loading, before
  *   `server/index.ts`'s bootstrap ever tries to build a MySQL-backed audit
- *   sink against it.
+ *   sink against it. The same `pool` instance is also handed to
+ *   `createDbQueryCapability()` (feature #30) so `db:query`'s
+ *   `getPoolMetrics()` — and, through it, `core/introspect.ts`'s kernel
+ *   introspection report — can read the pool's live active/idle/queued
+ *   connection counts.
  * - `onDisable` — destroys the `Kysely` instance (which also closes the
  *   underlying mysql2 pool — see `db.ts`'s docs on why there is only ever
  *   one pool), so a runtime `kernel.disablePlugin("database-mysql")`
@@ -141,6 +145,7 @@ export const provides: Readonly<Record<string, unknown>> = {
     },
     healthCheck: () => requireState().queryCapability.healthCheck(),
     getMetrics: () => requireState().queryCapability.getMetrics(),
+    getPoolMetrics: () => requireState().queryCapability.getPoolMetrics(),
   } satisfies DbQueryCapability,
   "db:transaction": {
     transaction<T>(fn: (trx: Transaction<Database>) => Promise<T>): Promise<T> {
@@ -201,7 +206,7 @@ export async function onEnable(context: PluginLifecycleContext): Promise<void> {
   state = {
     pool,
     db,
-    queryCapability: createDbQueryCapability(db, { metrics }),
+    queryCapability: createDbQueryCapability(db, { metrics, pool }),
     transactionCapability: createDbTransactionCapability(db),
   };
 }

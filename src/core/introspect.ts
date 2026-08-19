@@ -124,6 +124,15 @@ export interface PluginIntrospectionReport {
    * needed) and is absent for a `failed` plugin, same as `health`.
    */
   readonly metrics?: CapabilityMetricsSnapshot;
+  /**
+   * Present only when at least one capability this plugin provides exposes
+   * a pool-metrics-capable `getPoolMetrics()` — see this module's
+   * "Connection pool metrics" docs and {@link PoolMetricsCapability}. Like
+   * `metrics`, this is populated by the plain, synchronous
+   * {@link introspectKernel} itself (no `WithHealth`-style async variant
+   * needed) and is absent for a `failed` plugin, same as `metrics`.
+   */
+  readonly poolMetrics?: CapabilityPoolMetricsSnapshot;
 }
 
 /** `"unhealthy"` if any health-checkable capability a plugin provides reported unhealthy (or threw); `"healthy"` only if every one of them reported healthy. */
@@ -170,6 +179,48 @@ export interface CapabilityMetricsSnapshot {
  */
 export interface MetricsCapability {
   getMetrics(): CapabilityMetricsSnapshot;
+}
+
+/**
+ * ## Connection pool metrics (feature #30)
+ *
+ * `poolMetrics` is folded into {@link introspectKernel}'s own synchronous
+ * report exactly like `metrics` above — a connection pool's active/idle/
+ * queued counts are already-known in-memory numbers (the pool driver's own
+ * bookkeeping), never a live network probe. Any capability a plugin
+ * provides whose implementation exposes a zero-arg, synchronous
+ * `getPoolMetrics(): { active, idle, queued }` (see
+ * {@link PoolMetricsCapability}) is picked up the same duck-typed way
+ * `metrics` picks up `getMetrics()` — structurally, with no import of or
+ * special-case for `database-mysql`'s `db:query` capability (see
+ * `database-mysql/src/pool-metrics.ts`'s `collectPoolMetrics()`, which is
+ * simply the first capability to implement it). A plugin providing more
+ * than one pool-metrics-capable capability gets one combined snapshot:
+ * every field summed across all of them — unlike `metrics`'s count-weighted
+ * average, active/idle/queued are already plain counts of distinct
+ * connections, so summing (not averaging) is the correct combination; there
+ * is no "average pool size" to weight toward a busier capability.
+ */
+export interface CapabilityPoolMetricsSnapshot {
+  readonly active: number;
+  readonly idle: number;
+  readonly queued: number;
+}
+
+/**
+ * The structural protocol (feature #30) a provided capability's
+ * implementation can opt into for per-plugin connection-pool-metrics
+ * reporting: a zero-arg, synchronous `getPoolMetrics()` returning
+ * `{ active, idle, queued }`. `database-mysql`'s `db:query` capability
+ * implements this (see `query-capability.ts`'s
+ * `DbQueryCapability.getPoolMetrics`), but nothing here is specific to it —
+ * any capability implementation with a matching `getPoolMetrics` method is
+ * picked up the same way, duck-typed rather than imported. Synchronous,
+ * like {@link MetricsCapability.getMetrics}, because reading a pool's
+ * already-known in-memory connection counts needs no I/O.
+ */
+export interface PoolMetricsCapability {
+  getPoolMetrics(): CapabilityPoolMetricsSnapshot;
 }
 
 /** Full kernel introspection report: one entry per plugin plus a status-count summary. */
@@ -248,6 +299,56 @@ function metricsForModule(
   return foldCapabilityMetrics(capable.map((capability) => capability.getMetrics()));
 }
 
+/** Structural check for {@link PoolMetricsCapability} — a `getPoolMetrics` function on an object, nothing more. */
+function isPoolMetricsCapable(value: unknown): value is PoolMetricsCapability {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "getPoolMetrics" in value &&
+    typeof (value as { getPoolMetrics: unknown }).getPoolMetrics === "function"
+  );
+}
+
+/**
+ * Sum multiple capabilities' {@link CapabilityPoolMetricsSnapshot}s into
+ * one — see this module's "Connection pool metrics" docs for why summing
+ * (not averaging, unlike {@link foldCapabilityMetrics}) is the correct fold
+ * here.
+ */
+function foldPoolMetrics(
+  snapshots: readonly CapabilityPoolMetricsSnapshot[],
+): CapabilityPoolMetricsSnapshot | undefined {
+  if (snapshots.length === 0) {
+    return undefined;
+  }
+
+  return snapshots.reduce(
+    (sum, snapshot) => ({
+      active: sum.active + snapshot.active,
+      idle: sum.idle + snapshot.idle,
+      queued: sum.queued + snapshot.queued,
+    }),
+    { active: 0, idle: 0, queued: 0 },
+  );
+}
+
+/**
+ * Read and fold every pool-metrics-capable capability `module.provides`
+ * exposes into one {@link CapabilityPoolMetricsSnapshot}, or `undefined` if
+ * none of them are pool-metrics-capable. Synchronous and never throws —
+ * mirrors {@link metricsForModule}.
+ */
+function poolMetricsForModule(
+  provides: Readonly<Record<string, unknown>> | undefined,
+): CapabilityPoolMetricsSnapshot | undefined {
+  const capable = Object.values(provides ?? {}).filter(isPoolMetricsCapable);
+  if (capable.length === 0) {
+    return undefined;
+  }
+
+  return foldPoolMetrics(capable.map((capability) => capability.getPoolMetrics()));
+}
+
 function reportLoaded(
   plugin: LoadedPlugin,
   broker: CapabilityBroker,
@@ -255,12 +356,14 @@ function reportLoaded(
 ): PluginIntrospectionReport {
   const { provides, requires } = plugin.manifest.capabilities;
   const metrics = metricsForModule(plugin.module.provides);
+  const poolMetrics = poolMetricsForModule(plugin.module.provides);
   return {
     id: plugin.id,
     version: plugin.manifest.version,
     status: disabled ? "disabled" : "loaded",
     capabilities: { provides, requires, granted: grantedCapabilities(plugin.id, requires, broker) },
     ...(metrics ? { metrics } : {}),
+    ...(poolMetrics ? { poolMetrics } : {}),
   };
 }
 
@@ -422,6 +525,13 @@ export function formatIntrospectionReport(report: KernelIntrospectionReport): st
         `  metrics:  ${String(plugin.metrics.queryCount)} queries, ` +
           `${String(plugin.metrics.errorCount)} errors, ` +
           `${plugin.metrics.averageDurationMs.toFixed(1)}ms avg`,
+      );
+    }
+    if (plugin.poolMetrics) {
+      lines.push(
+        `  pool:     ${String(plugin.poolMetrics.active)} active, ` +
+          `${String(plugin.poolMetrics.idle)} idle, ` +
+          `${String(plugin.poolMetrics.queued)} queued`,
       );
     }
     if (plugin.status === "failed") {
