@@ -1066,7 +1066,7 @@
       "Cover generation with the minimal option set and with a fuller option set (capabilities, description)"
     ],
     "depends_on": [75, 77],
-    "passes": false
+    "passes": true
   },
   {
     "id": 84,
