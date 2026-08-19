@@ -1104,7 +1104,7 @@
       "Write an integration test applying the migrations and asserting constraints (unique slug per namespace) are enforced"
     ],
     "depends_on": [19, 22, 85],
-    "passes": false
+    "passes": true
   },
   {
     "id": 87,
