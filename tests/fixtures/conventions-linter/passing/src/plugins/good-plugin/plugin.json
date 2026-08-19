@@ -1,0 +1,10 @@
+{
+  "id": "good-plugin",
+  "version": "0.1.0",
+  "depends_on": {},
+  "capabilities": {
+    "provides": ["good:thing"],
+    "requires": ["other:thing"]
+  },
+  "entry_point": "index.ts"
+}
