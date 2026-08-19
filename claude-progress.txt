@@ -1596,3 +1596,21 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - active is derived (allConnections.length - freeConnections.length) rather than tracked as an independent counter, so it can never drift out of sync with mysql2's own bookkeeping.
 - Followed the exact feature #26 precedent for introspection wiring: a new duck-typed structural protocol + folding function + PluginIntrospectionReport field + formatIntrospectionReport line, kept fully generic (no import of/special-case for database-mysql in core/introspect.ts). Chose summation over count-weighted averaging for the multi-capability fold, since active/idle/queued are already plain counts, not rates.
 - Docker was unavailable in this sandbox (docker daemon not running), so the new pool-metrics.integration.test.ts could not be executed end-to-end here; it self-skips via the same describe.runIf(mysqlReachable) pattern every other *.integration.test.ts in this plugin uses, and its assertions were reasoned through against mysql2's actual base/pool.js source (traceCallback calls getConnection's internals synchronously) to confirm correctness. Future agents running with Docker available should double-check this file's mid-flight assertion once directly.
+## 2026-08-18 17:36 — Feature #73: plugin-builder plugin manifest
+
+### What was done:
+- Created src/plugins/plugin-builder/plugin.json (id: plugin-builder, version 0.1.0, entry_point index.ts, empty depends_on/capabilities — scaffold-only manifest consistent with the doc's note that a manifest-only plugin is valid before its lifecycle code exists)
+- Validated the manifest passes PluginManifestSchema (src/core/manifest.ts) and is picked up by scanPluginDirectories() — confirmed via the new test and by observing the registry log go from found:4/skipped:2 to found:5/skipped:1 (only wiki still missing its manifest, out of scope for this feature)
+- Added tests/plugins/plugin-builder/manifest.test.ts (4 tests) mirroring the existing per-plugin manifest.test.ts pattern (html-renderer, rbac, api-gateway, database-mysql): discoverability via scanPluginDirectories, validateManifest() success, id matches PLUGIN_ID_PATTERN and directory name, and confirms the scaffold-only manifest declares no capabilities/dependencies
+
+### Testing:
+- npx vitest run tests/plugins/plugin-builder/manifest.test.ts tests/core/manifest.test.ts tests/core/registry.test.ts -> 3 files, 54 tests passed
+- npm run lint -> clean
+- npm run build (tsc) -> clean
+- npm test (full suite) -> 81 files / 1272 tests passed, 9 files / 49 tests skipped (up from 80/1268 passing baseline, +1 file +4 tests, no regressions)
+- ./init.sh -> kernel bootstrap log confirms plugin-builder no longer skipped with missing_manifest
+
+### Notes:
+- plugin-builder's plugin.json is intentionally minimal: no capabilities.provides/requires and no depends_on, since at this stage it's a scaffolding/CLI meta-tool (create-plugin generator, JSON Schema, linter — see spec.md section 5) rather than something that exposes or consumes kernel-brokered runtime capabilities. Future features (the JSON Schema, create-plugin CLI, static linter, index.ts lifecycle entry) can extend this manifest as needed.
+- entry_point is set to index.ts even though that file doesn't exist yet — per docs/plugin-conventions.md and registry.ts, entry_point existence on disk is not checked at scan/validation time, so a manifest-only scaffold is valid (same state several other shipped plugins are/were in).
+- The wiki plugin is still missing its plugin.json (unrelated feature, not touched here) — the kernel bootstrap log still shows found:5/skipped:1 after this change, previously found:4/skipped:2.
