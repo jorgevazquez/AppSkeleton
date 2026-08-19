@@ -14,14 +14,18 @@
  * feature's whole point is proving `createWikiPagesStore` reads/writes
  * *entirely* through that capability, no direct SQL client usage (step 1).
  *
- * Applies only the two migrations this suite needs
- * (`wiki_namespaces`/`wiki_pages`) by importing their `up()`/`down()`
- * modules directly — the same "own migration files' up()/down(), not the
- * shared checksum-verified runner and its single global `schema_migrations`
+ * Applies the three migrations `wiki_namespaces`/`wiki_pages`/
+ * `wiki_revisions` need by importing their `up()`/`down()` modules
+ * directly — the same "own migration files' up()/down(), not the shared
+ * checksum-verified runner and its single global `schema_migrations`
  * table" technique `rbac-persistence.integration.test.ts`'s own module doc
  * explains, so this suite can never race a concurrently-scheduled sibling
  * suite's migration bookkeeping. `wiki_revisions` (migration 0003) is
- * irrelevant to page CRUD and is deliberately left unapplied here.
+ * applied here too — feature #89's `updatePage` snapshots into it on every
+ * update, in the same transaction as the update itself, so it must exist
+ * for this suite's `updatePage` coverage to run at all (not just for
+ * `revisions-store.integration.test.ts`'s own dedicated feature #89
+ * coverage of what actually lands in it).
  *
  * This file crosses from `tests/plugins/wiki/` into `database-mysql`'s
  * pool/db/query-capability modules directly — the same "kernel-integration
@@ -40,6 +44,7 @@ import {
 } from "../../../src/plugins/database-mysql/src/query-capability.js";
 import * as createNamespaces from "../../../src/plugins/wiki/src/migrations/0001_create_wiki_namespaces.js";
 import * as createPages from "../../../src/plugins/wiki/src/migrations/0002_create_wiki_pages.js";
+import * as createRevisions from "../../../src/plugins/wiki/src/migrations/0003_create_wiki_revisions.js";
 import { createWikiPagesStore } from "../../../src/plugins/wiki/src/pages.js";
 
 /** Matches docker-compose.yml's `mysql` service credentials — same fixture every sibling integration suite uses. */
@@ -55,7 +60,7 @@ const DOCKER_COMPOSE_CONFIG = {
 };
 
 /** This suite's own tables, child-before-parent for the DROP order. */
-const WIKI_TABLES = ["wiki_pages", "wiki_namespaces"] as const;
+const WIKI_TABLES = ["wiki_revisions", "wiki_pages", "wiki_namespaces"] as const;
 
 async function probeMysqlReachable(): Promise<boolean> {
   try {
@@ -108,6 +113,7 @@ describe.runIf(mysqlReachable)("wiki pages store — db:query CRUD integration (
     }
     await createNamespaces.up(setup.db);
     await createPages.up(setup.db);
+    await createRevisions.up(setup.db);
 
     await setup.db
       .insertInto("wiki_namespaces")
@@ -123,6 +129,7 @@ describe.runIf(mysqlReachable)("wiki pages store — db:query CRUD integration (
     // destroyed `setup`'s pool/db handles.
     const cleanup = connect();
     try {
+      await createRevisions.down(cleanup.db);
       await createPages.down(cleanup.db);
       await createNamespaces.down(cleanup.db);
     } finally {

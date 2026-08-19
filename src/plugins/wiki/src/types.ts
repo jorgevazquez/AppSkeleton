@@ -26,6 +26,27 @@ export interface Page {
   readonly updatedAt: Date;
 }
 
+/**
+ * An immutable snapshot of a page's `title`/`content` as it existed
+ * immediately before some edit (feature #89 — "Revision history: every
+ * edit creates a revision row"). Mirrors
+ * `migrations/0003_create_wiki_revisions.ts`'s `wiki_revisions` schema 1:1
+ * — see that migration's own doc comment for why `pageId` references
+ * {@link Page.id}, never a page's mutable `slug`.
+ */
+export interface Revision {
+  /** Surrogate autoincrement primary key. Also the tiebreaker `revisions.ts`'s `listRevisions` orders by, newest first. */
+  readonly id: number;
+  /** The {@link Page.id} this revision belongs to. */
+  readonly pageId: number;
+  /** The page's `title` immediately before the edit that produced this revision. */
+  readonly title: string;
+  /** The page's `content` immediately before the edit that produced this revision. */
+  readonly content: string;
+  /** When this revision was recorded — i.e. when the edit that superseded it was applied. */
+  readonly createdAt: Date;
+}
+
 /** Input to {@link WikiPagesStore.createPage} in `pages.ts`. */
 export interface CreatePageInput {
   /** Must reference an existing `wiki_namespaces.id` row — validated before insert (feature #87 step 2). */
