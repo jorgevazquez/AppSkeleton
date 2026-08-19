@@ -1029,7 +1029,7 @@
       "Write a test invoking the programmatic API directly, bypassing the CLI"
     ],
     "depends_on": [75],
-    "passes": false
+    "passes": true
   },
   {
     "id": 81,
