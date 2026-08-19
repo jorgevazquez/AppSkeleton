@@ -1041,7 +1041,7 @@
       "Write a test asserting the warning fires for an intentionally mismatched fixture"
     ],
     "depends_on": [77],
-    "passes": false
+    "passes": true
   },
   {
     "id": 82,

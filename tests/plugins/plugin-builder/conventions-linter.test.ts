@@ -81,6 +81,46 @@ describe("conventions linter (feature #77)", () => {
     });
   });
 
+  describe("failing fixture: unsatisfied capability requirement (feature #81)", () => {
+    it("warns when a plugin's capabilities.requires names a capability no loaded plugin provides", async () => {
+      const results = await lintAllPlugins(fixturePluginsRoot("capability-cross-check"));
+      const needsGhost = results.find((result) => result.pluginName === "needs-ghost-capability");
+
+      expect(needsGhost, "expected a result for needs-ghost-capability").toBeDefined();
+      expect(needsGhost && isClean(needsGhost), needsGhost && describeIssues(needsGhost)).toBe(
+        false,
+      );
+
+      const issue = needsGhost?.issues.find(
+        (candidate) => candidate.code === "unsatisfied_capability_requirement",
+      );
+      expect(issue).toBeDefined();
+      expect(issue?.message).toContain("ghost:capability");
+      expect(issue?.severity).toBe("warning");
+    });
+
+    it("does not flag a capability requirement satisfied by a sibling plugin's capabilities.provides", async () => {
+      const results = await lintAllPlugins(fixturePluginsRoot("capability-cross-check"));
+      const otherPlugin = results.find((result) => result.pluginName === "other-plugin");
+
+      expect(otherPlugin, "expected a result for other-plugin").toBeDefined();
+      expect(otherPlugin && isClean(otherPlugin), otherPlugin && describeIssues(otherPlugin)).toBe(
+        true,
+      );
+    });
+
+    it("is scoped to the whole-set sweep — a bare lintPlugin() call does not attempt the cross-check", async () => {
+      const result = await lintPlugin(
+        fixturePluginsRoot("capability-cross-check"),
+        "needs-ghost-capability",
+      );
+
+      expect(result.issues.map((issue) => issue.code)).not.toContain(
+        "unsatisfied_capability_requirement",
+      );
+    });
+  });
+
   describe("run against every shipped plugin (step 2 — drift is caught automatically)", () => {
     it("finds zero convention violations across every plugin under src/plugins", async () => {
       const results = await lintAllPlugins(REAL_PLUGINS_ROOT);

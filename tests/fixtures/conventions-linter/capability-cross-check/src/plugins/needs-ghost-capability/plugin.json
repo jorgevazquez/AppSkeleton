@@ -1,0 +1,10 @@
+{
+  "id": "needs-ghost-capability",
+  "version": "0.1.0",
+  "depends_on": {},
+  "capabilities": {
+    "provides": [],
+    "requires": ["ghost:capability"]
+  },
+  "entry_point": "index.ts"
+}

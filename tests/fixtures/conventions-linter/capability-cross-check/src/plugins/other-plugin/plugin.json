@@ -1,0 +1,10 @@
+{
+  "id": "other-plugin",
+  "version": "0.1.0",
+  "depends_on": {},
+  "capabilities": {
+    "provides": ["other:thing"],
+    "requires": []
+  },
+  "entry_point": "index.ts"
+}
