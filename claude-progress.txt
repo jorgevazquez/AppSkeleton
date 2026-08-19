@@ -1864,3 +1864,23 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Chose plain bash scripts (not a TS CLI like migrate.ts/seed.ts) since the feature explicitly asks for a 'mysqldump-based' script — shelling out directly to mysqldump/mysql keeps it usable outside the Node toolchain entirely (cron, ops runbooks) with zero npm dependencies.
 - scripts/lib/env.sh's .env parser avoids bash 4+-only negative-index substring expansion (${value:1:-1}) since macOS ships bash 3.2 by default; used front/back parameter-expansion trims instead for portability.
 - Flagging for whoever eventually tackles the pre-existing shared-schema_migrations-table race (already flagged by feature #19/#34/#86's notes): it's still there and still not this feature's job to fix, but it does mean a local (non-Docker) full-suite run will show several unrelated red integration tests that are not signal for anything backup/restore related.
+
+---
+
+## 2026-08-18 18:53 — Feature #79: Reference hello-world plugin generated and proven to load in the real kernel
+
+### What was done:
+- Generated src/plugins/hello-world via the real, wired-up feature #76 CLI (npm run create-plugin -- --id hello-world --description "..."), which itself drives feature #75's generatePlugin() — produced plugin.json (no deps/capabilities), index.ts (all four lifecycle hooks, empty provides), README.md, src/.gitkeep, and tests/plugins/hello-world/manifest.test.ts, none of it hand-edited afterward.
+- Added tests/plugins/hello-world/kernel-bootstrap.integration.test.ts with two tests: (1) boots the real kernel via bootstrapKernel({ env: {} }) against the actual shipped src/plugins tree (same pattern as tests/core/smoke.test.ts) and asserts kernel.introspect() reports hello-world as status:"loaded", version 0.1.0, empty provides/requires/granted, no error; (2) calls generatePlugin() again with the identical id/description into an isolated temp dir and asserts the regenerated plugin.json/index.ts/README.md/src/.gitkeep are byte-identical to the committed files, proving the committed plugin is exactly today's generator output with zero drift.
+
+### Testing:
+- npx vitest run tests/plugins/hello-world — 2 files / 4 tests passing (2 from the generator's own manifest.test.ts, 2 from the new kernel-bootstrap integration suite).
+- npx vitest run tests/plugins/plugin-builder — 7 files / 66 tests passing, including conventions-linter.test.ts's real-plugin sweep (feature #85), which now also lints hello-world and finds zero violations.
+- Full npx vitest run: 1485 passed / 11 failed / 6 skipped — same 11 failures (database-mysql migrator/integration, wiki migrations, audit-persistence) as a baseline run with zero changes present (confirmed via init.sh's own pre-change run showing the identical 11/1481/6 split before this feature's 4 new tests were added); all are the extensively pre-documented shared-MySQL-across-worktrees flake noted throughout claude-progress.txt, unrelated to hello-world.
+- npm run lint (eslint) clean, npm run build (tsc) clean, npx prettier --check clean on all new files (post pre-commit-hook auto-format, re-ran the hello-world + plugin-builder suites to confirm still green).
+
+### Notes:
+- Used the real npm run create-plugin CLI (not a bare generatePlugin() call) so this doubles as an end-to-end dogfood of feature #76's CLI wiring, not just feature #75's programmatic API.
+- The regeneration test hardcodes HELLO_WORLD_DESCRIPTION to match the exact --description string hello-world was generated with; if that plugin is ever intentionally regenerated with a different description, this constant must be updated in lockstep or the byte-identity assertion will (correctly) fail.
+- plugin-builder and wiki still have no index.ts yet (pre-existing, per features #74/#78/#86/#87's notes) and fail to load at kernel bootstrap for that reason — visible in this test's own log output but unrelated to hello-world, which loads cleanly alongside api-gateway/html-renderer/rbac.
+- Named the new test file kernel-bootstrap.integration.test.ts (not just kernel-bootstrap.test.ts) per feature #79 step 3's explicit wording ("integration test") even though — like tests/core/smoke.test.ts — it needs no Docker/MySQL and isn't gated behind describe.runIf; it's a real multi-component (loader+registry+broker+introspect) integration test, just not a DB-dependent one, so the *.integration.test.ts naming convention's usual 'requires real MySQL' connotation doesn't quite apply here — flagging in case a future convention pass wants a clearer split for that case.
