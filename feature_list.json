@@ -374,7 +374,7 @@
       "Write an integration test asserting audit events recorded during a session are queryable from the database after restart"
     ],
     "depends_on": [11, 20, 22],
-    "passes": false
+    "passes": true
   },
   {
     "id": 30,
