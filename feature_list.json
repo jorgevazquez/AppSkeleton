@@ -1400,7 +1400,7 @@
       "Add a test asserting the documented defaults match the actual configured values (no drift)"
     ],
     "depends_on": [66],
-    "passes": false
+    "passes": true
   },
   {
     "id": 110,

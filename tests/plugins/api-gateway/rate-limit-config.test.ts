@@ -8,7 +8,7 @@ import {
 describe("loadRateLimitConfig — safe to load with no configuration at all", () => {
   it("defaults RATE_LIMIT_MAX and RATE_LIMIT_WINDOW_MS when unset", () => {
     expect(loadRateLimitConfig({ env: {} })).toEqual({
-      RATE_LIMIT_MAX: 100,
+      RATE_LIMIT_MAX: 300,
       RATE_LIMIT_WINDOW_MS: 60000,
     });
   });
@@ -28,7 +28,7 @@ describe("loadRateLimitConfig — safe to load with no configuration at all", ()
 
   it("RateLimitConfigSchema alone parses an empty object to the documented defaults", () => {
     expect(RateLimitConfigSchema.parse({})).toEqual({
-      RATE_LIMIT_MAX: 100,
+      RATE_LIMIT_MAX: 300,
       RATE_LIMIT_WINDOW_MS: 60000,
     });
   });
