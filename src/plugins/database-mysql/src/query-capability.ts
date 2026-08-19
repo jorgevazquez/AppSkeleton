@@ -95,8 +95,26 @@
  * reflect real traffic. Omitting `metrics` entirely still returns a valid,
  * all-zero snapshot rather than throwing — there's simply nothing feeding
  * it.
+ *
+ * ## Connection pool metrics (feature #30)
+ *
+ * {@link DbQueryCapability.getPoolMetrics} exposes the shared mysql2 pool's
+ * current active/idle/queued connection counts — a synchronous, never-throws
+ * zero-arg method `core/introspect.ts` picks up the same duck-typed way it
+ * already picks up `getMetrics()` above, feeding feature #24's kernel
+ * introspection integration. Unlike `getMetrics()`, which reads
+ * `query-metrics.ts`'s own accumulated *running-total* counters,
+ * `getPoolMetrics()` reads mysql2's pool bookkeeping directly (via
+ * `pool-metrics.ts`'s `collectPoolMetrics()`) and always reflects the pool's
+ * current, point-in-time state. It needs the raw mysql2 `Pool` instance
+ * itself (`options.pool`) — this module never constructs one (that's
+ * pool.ts's job) — so omitting it (e.g. a fake-`Kysely`-only unit test, or a
+ * capability built before the pool exists) yields an all-zero snapshot
+ * rather than throwing, exactly like `getMetrics()` with no recorder wired
+ * in.
  */
 import { sql, type Kysely } from "kysely";
+import type { Pool } from "mysql2/promise";
 import { DatabaseError, isAppError } from "../../../core/errors.js";
 import { isPoolExhaustedError, retryWithBackoff, type RetryOptions } from "./resilience.js";
 import type { Database } from "./db.js";
@@ -105,6 +123,7 @@ import {
   type QueryMetricsRecorder,
   type QueryMetricsSnapshot,
 } from "./query-metrics.js";
+import { collectPoolMetrics, type PoolMetricsSnapshot } from "./pool-metrics.js";
 
 /**
  * Result of {@link DbQueryCapability.healthCheck}. Structurally matches the
@@ -139,9 +158,15 @@ export interface DbQueryCapability {
    * never throws.
    */
   getMetrics(): QueryMetricsSnapshot;
+  /**
+   * The shared connection pool's current active/idle/queued counts — see
+   * this module's "Connection pool metrics" docs. Synchronous, and never
+   * throws.
+   */
+  getPoolMetrics(): PoolMetricsSnapshot;
 }
 
-/** Options controlling {@link createDbQueryCapability}'s feature #23 retry-on-transient-connection-error behavior and feature #26 metrics. */
+/** Options controlling {@link createDbQueryCapability}'s feature #23 retry-on-transient-connection-error behavior, feature #26 metrics, and feature #30 pool metrics. */
 export interface DbQueryCapabilityOptions {
   /** Overrides for the mid-session retry/backoff policy. See resilience.ts's `RetryOptions`. */
   retry?: RetryOptions;
@@ -154,6 +179,15 @@ export interface DbQueryCapabilityOptions {
    * recorder (an all-zero snapshot forever) when omitted.
    */
   metrics?: QueryMetricsRecorder;
+  /**
+   * The raw mysql2 pool {@link DbQueryCapability.getPoolMetrics} reads
+   * active/idle/queued counts from — see this module's "Connection pool
+   * metrics" docs. Share the exact same pool instance passed to
+   * `createDbPool()`/`createKyselyDb()` so the numbers reflect real
+   * connections. Omitting it yields an all-zero snapshot rather than
+   * throwing.
+   */
+  pool?: Pool;
 }
 
 /** Human-readable detail from an unknown thrown value, safe to embed in a `DatabaseError`'s internal `message`. */
@@ -170,6 +204,7 @@ export function createDbQueryCapability(
   options: DbQueryCapabilityOptions = {},
 ): DbQueryCapability {
   const metrics = options.metrics ?? createQueryMetricsRecorder();
+  const pool = options.pool;
   return {
     async query<T>(fn: (db: Kysely<Database>) => Promise<T>): Promise<T> {
       try {
@@ -198,6 +233,9 @@ export function createDbQueryCapability(
     },
     getMetrics(): QueryMetricsSnapshot {
       return metrics.snapshot();
+    },
+    getPoolMetrics(): PoolMetricsSnapshot {
+      return pool ? collectPoolMetrics(pool) : { active: 0, idle: 0, queued: 0 };
     },
   };
 }

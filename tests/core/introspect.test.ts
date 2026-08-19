@@ -310,6 +310,27 @@ describe("formatIntrospectionReport", () => {
 
     expect(text).toContain("metrics:  5 queries, 1 errors, 12.3ms avg");
   });
+
+  it("renders a pool-metrics-capable plugin's active/idle/queued connection counts (feature #30)", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("database-mysql", { provides: ["db:query"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": {
+              getPoolMetrics: () => ({ active: 3, idle: 2, queued: 1 }),
+            },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const text = formatIntrospectionReport(introspectKernel(result, broker));
+
+    expect(text).toContain("pool:     3 active, 2 idle, 1 queued");
+  });
 });
 
 describe("introspectKernelWithHealth (feature #24 — database health check integrated into kernel introspection)", () => {
@@ -587,5 +608,162 @@ describe("introspectKernel — basic query performance metrics (feature #26)", (
 
     expect(report.plugins[0]?.metrics).toBeUndefined();
     expect("metrics" in (report.plugins[0] ?? {})).toBe(false);
+  });
+});
+
+describe("introspectKernel — connection pool metrics (feature #30)", () => {
+  it("reports a pool-metrics-capable capability's active/idle/queued counts on the plain, synchronous report", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("database-mysql", { provides: ["db:query"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": {
+              getPoolMetrics: () => ({ active: 3, idle: 2, queued: 1 }),
+            },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    // No `introspectKernelWithHealth`-style async wrapper needed — same as
+    // feature #26's `metrics`, this reads already-known in-memory counters.
+    const report = introspectKernel(result, broker);
+
+    expect(report.plugins.find((p) => p.id === "database-mysql")?.poolMetrics).toEqual({
+      active: 3,
+      idle: 2,
+      queued: 1,
+    });
+  });
+
+  it("omits the poolMetrics field entirely for a plugin that provides no pool-metrics-capable capability", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("html-renderer", { provides: ["render:template"] }),
+        module: moduleFixture({ provides: { "render:template": () => "<html></html>" } }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = introspectKernel(result, broker);
+
+    const plugin = report.plugins.find((p) => p.id === "html-renderer");
+    expect(plugin).toBeDefined();
+    expect(plugin?.poolMetrics).toBeUndefined();
+    expect("poolMetrics" in (plugin ?? {})).toBe(false);
+  });
+
+  it("leaves a failed plugin's report untouched — no poolMetrics field, since there is no live module to read counters from", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("broken"),
+        module: moduleFixture({
+          onInstall: () => {
+            throw new Error("boom");
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = introspectKernel(result, broker);
+
+    const broken = report.plugins.find((p) => p.id === "broken");
+    expect(broken?.status).toBe("failed");
+    expect(broken?.poolMetrics).toBeUndefined();
+  });
+
+  it("sums (not averages) multiple pool-metrics-capable capabilities a plugin provides into one combined snapshot", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("multi", { provides: ["db:query", "cache:get"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": {
+              getPoolMetrics: () => ({ active: 3, idle: 2, queued: 1 }),
+            },
+            "cache:get": {
+              getPoolMetrics: () => ({ active: 1, idle: 4, queued: 0 }),
+            },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = introspectKernel(result, broker);
+
+    expect(report.plugins.find((p) => p.id === "multi")?.poolMetrics).toEqual({
+      active: 4,
+      idle: 6,
+      queued: 1,
+    });
+  });
+
+  it("reflects live updates across successive calls, simulating metrics changing under concurrent queries", async () => {
+    const broker = createCapabilityBroker();
+    // A mutable counter object stands in for the connection pool's own
+    // live internal state (see database-mysql's pool-metrics.ts) — each
+    // call to getPoolMetrics() below reads whatever it currently holds,
+    // exactly like a real pool under concurrent load being sampled at
+    // different points in time.
+    const live = { active: 0, idle: 3, queued: 0 };
+    const definitions: PluginDefinition[] = [
+      {
+        manifest: manifest("database-mysql", { provides: ["db:query"] }),
+        module: moduleFixture({
+          provides: {
+            "db:query": { getPoolMetrics: () => ({ ...live }) },
+          },
+        }),
+      },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    expect(introspectKernel(result, broker).plugins[0]?.poolMetrics).toEqual({
+      active: 0,
+      idle: 3,
+      queued: 0,
+    });
+
+    // Concurrent queries exceed connectionLimit: every connection busy,
+    // extra callers queued.
+    live.active = 3;
+    live.idle = 0;
+    live.queued = 4;
+    expect(introspectKernel(result, broker).plugins[0]?.poolMetrics).toEqual({
+      active: 3,
+      idle: 0,
+      queued: 4,
+    });
+
+    // Burst drained: connections released back to idle, queue empty again.
+    live.active = 0;
+    live.idle = 3;
+    live.queued = 0;
+    expect(introspectKernel(result, broker).plugins[0]?.poolMetrics).toEqual({
+      active: 0,
+      idle: 3,
+      queued: 0,
+    });
+  });
+
+  it("does not mutate or otherwise alter the plain introspectKernel() report for an unrelated call [poolMetrics omitted]", async () => {
+    const broker = createCapabilityBroker();
+    const definitions: PluginDefinition[] = [
+      { manifest: manifest("leaf"), module: moduleFixture() },
+    ];
+    const result = expectOk(await loadPlugins(definitions, broker));
+
+    const report = introspectKernel(result, broker);
+
+    expect(report.plugins[0]?.poolMetrics).toBeUndefined();
+    expect("poolMetrics" in (report.plugins[0] ?? {})).toBe(false);
   });
 });
