@@ -86,6 +86,7 @@ import {
 } from "../core/introspect.js";
 import {
   loadPlugins,
+  unloadPlugins,
   type PluginDefinition,
   type PluginLoadResult,
   type PluginModule,
@@ -488,8 +489,139 @@ export async function listen(kernel: Kernel): Promise<void> {
   await kernel.httpApp.listen({ port: kernel.config.PORT, host: "0.0.0.0" });
 }
 
+/**
+ * Hard ceiling on {@link shutdownKernel}'s whole graceful sequence (feature
+ * #111, step 2) — chosen well above any single plugin's own realistic
+ * teardown cost (a Fastify `close()` drain plus a `mysql2` pool `end()`) so
+ * a normal shutdown never trips it, while still bounding how long an
+ * operator's `kill`/orchestrator SIGTERM can be made to wait before the
+ * process exits anyway.
+ */
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+
+export interface ShutdownKernelOptions {
+  /** Overrides {@link DEFAULT_SHUTDOWN_TIMEOUT_MS} — mainly for tests that need to exercise the timeout path quickly. */
+  timeoutMs?: number;
+}
+
+/**
+ * Graceful shutdown sequence (feature #111, step 1): stop accepting new HTTP
+ * connections and drain in-flight requests first — `kernel.httpApp.close()`,
+ * relying on Fastify's own `close()` semantics (stop the listening socket,
+ * wait for requests already in flight to finish, only then resolve) — and
+ * only *after* that has settled, tear down every loaded plugin in reverse
+ * dependency order via `unloadPlugins()` (the same primitive
+ * `kernel.disablePlugin()` already uses), which is what actually closes the
+ * database-mysql connection pool (see that plugin's `onDisable`). Closing
+ * the HTTP server as an explicit first step — rather than just letting
+ * `unloadPlugins()`'s own reverse-load-order run api-gateway's `onDisable`
+ * whenever it happens to come up — is what guarantees "stop accepting new
+ * connections, drain in-flight requests, close the DB pool" happens in that
+ * exact order even though today's shipped manifests declare no `depends_on`
+ * between api-gateway and database-mysql (so load/unload order between them
+ * is otherwise just directory-scan order, not something this sequence can
+ * rely on). `unloadPlugins()` still runs api-gateway's own `onDisable`
+ * afterwards as part of the full loaded-plugin set; a second `app.close()`
+ * on an already-closed Fastify instance is a documented no-op, not an error.
+ *
+ * The whole sequence races a hard timeout (step 2) so one stuck in-flight
+ * request or a hanging plugin teardown hook can never leave the process
+ * running indefinitely — {@link installShutdownSignalHandlers} force-exits
+ * with a non-zero code when this rejects, timeout included.
+ */
+export async function shutdownKernel(
+  kernel: Kernel,
+  options: ShutdownKernelOptions = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+
+  const sequence = (async () => {
+    if (kernel.httpApp) {
+      kernel.logger.info(
+        "Graceful shutdown: closing the HTTP server (no new connections; draining in-flight requests).",
+      );
+      await kernel.httpApp.close();
+    }
+
+    kernel.logger.info("Graceful shutdown: unloading plugins (closes the database pool, if any).");
+    const unloadResult = await unloadPlugins(kernel.plugins.loaded, kernel.broker, {
+      logger: kernel.logger,
+    });
+    if (isErr(unloadResult)) {
+      // unloadPlugins() already gives every plugin a teardown attempt even
+      // when an earlier one fails (see its own docs) — log and continue
+      // rather than throwing, so one plugin's teardown failure never blocks
+      // the rest of the shutdown or the process exit that follows it.
+      kernel.logger.error(
+        { err: unloadResult.error },
+        "One or more plugins failed to unload cleanly during graceful shutdown.",
+      );
+    }
+  })();
+
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `Graceful shutdown did not complete within ${String(timeoutMs)}ms; forcing exit.`,
+        ),
+      );
+    }, timeoutMs);
+    // Never keeps the process alive on its own — this timer exists purely
+    // to bound `sequence` above; it must not itself stop a fully-settled
+    // process from exiting if something outside this function is holding
+    // the loop open.
+    timer.unref();
+  });
+
+  try {
+    await Promise.race([sequence, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Wire `SIGTERM`/`SIGINT` to {@link shutdownKernel} (feature #111). The first
+ * signal received starts exactly one graceful shutdown; `process.exit(0)`
+ * once it resolves, `process.exit(1)` if it rejects (including the hard
+ * timeout above) — an orchestrator (Docker/Kubernetes/systemd) sending
+ * SIGTERM sees a clean exit on success and a non-zero one if shutdown
+ * couldn't complete in time, never a hang. A second signal arriving while a
+ * shutdown is already in flight is logged and ignored rather than starting
+ * an overlapping second sequence (double-closing an already-closing HTTP
+ * server, tearing down plugins twice, ...).
+ */
+export function installShutdownSignalHandlers(kernel: Kernel): void {
+  let shuttingDown = false;
+
+  const handleSignal = (signal: NodeJS.Signals): void => {
+    if (shuttingDown) {
+      kernel.logger.warn({ signal }, "Shutdown already in progress; ignoring repeated signal.");
+      return;
+    }
+    shuttingDown = true;
+    kernel.logger.info({ signal }, "Received shutdown signal; beginning graceful shutdown.");
+
+    shutdownKernel(kernel)
+      .then(() => {
+        kernel.logger.info("Graceful shutdown complete; exiting.");
+        process.exit(0);
+      })
+      .catch((cause: unknown) => {
+        kernel.logger.error({ err: cause }, "Graceful shutdown failed or timed out; forcing exit.");
+        process.exit(1);
+      });
+  };
+
+  process.on("SIGTERM", handleSignal);
+  process.on("SIGINT", handleSignal);
+}
+
 async function main(): Promise<void> {
   const kernel = await bootstrapKernel();
+  installShutdownSignalHandlers(kernel);
   await listen(kernel);
 }
 
