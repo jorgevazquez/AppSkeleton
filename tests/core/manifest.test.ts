@@ -6,20 +6,7 @@ import {
   type PluginManifest,
 } from "../../src/core/manifest.js";
 import { isErr, isOk } from "../../src/core/types.js";
-
-function validManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    id: "database-mysql",
-    version: "1.2.3",
-    depends_on: { rbac: "^1.0.0" },
-    capabilities: {
-      provides: ["db:query", "db:transaction"],
-      requires: ["config:read"],
-    },
-    entry_point: "index.ts",
-    ...overrides,
-  };
-}
+import { validManifest } from "../fixtures/plugin-manifests.js";
 
 /** Assert failure and return the issue list for further assertions. */
 function expectIssues(input: unknown): ManifestValidationIssue[] {

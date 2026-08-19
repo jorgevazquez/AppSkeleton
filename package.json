@@ -22,6 +22,7 @@
     "seed": "tsx src/cli/seed.ts",
     "create-plugin": "tsx src/plugins/plugin-builder/src/cli.ts create",
     "introspect": "tsx src/cli/introspect.ts",
+    "generate:manifest-schema": "tsx src/plugins/plugin-builder/src/generate-manifest-json-schema.ts",
     "prepare": "husky"
   },
   "lint-staged": {
@@ -38,6 +39,7 @@
     "@fastify/cors": "^10.0.0",
     "@fastify/helmet": "^12.0.0",
     "@fastify/rate-limit": "^10.0.0",
+    "ajv": "^8.20.0",
     "dotenv": "^16.4.0",
     "fastify": "^5.0.0",
     "kysely": "^0.29.5",
@@ -45,7 +47,8 @@
     "pino": "^9.0.0",
     "pino-pretty": "^11.0.0",
     "semver": "^7.8.5",
-    "zod": "^3.23.0"
+    "zod": "^3.23.0",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@types/node": "^22.7.0",
