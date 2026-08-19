@@ -45,6 +45,7 @@ import { loadRateLimitConfig } from "./src/rate-limit-config.js";
 import { registerRateLimiting } from "./src/rate-limit.js";
 import { registerRbacProtection } from "./src/rbac-protection.js";
 import { registerRequestId } from "./src/request-id.js";
+import { loadRequestLimitsConfig } from "./src/request-limits-config.js";
 import {
   createRouteRegistrar,
   type HttpRouteRegistrationCapability,
@@ -107,6 +108,18 @@ export {
   type RateLimitConfig,
 } from "./src/rate-limit-config.js";
 export { registerRateLimiting } from "./src/rate-limit.js";
+
+// Re-exported so a consuming plugin (or a test) can reference the
+// request-size-limit / timeout config schema/loader, or construct a
+// standalone test Fastify instance with the same `bodyLimit`/`requestTimeout`
+// wiring `buildApp()` below uses, without reaching into this plugin's `src/`
+// internals — feature #71, see `./src/request-limits-config.ts` for the full
+// contract.
+export {
+  RequestLimitsConfigSchema,
+  loadRequestLimitsConfig,
+  type RequestLimitsConfig,
+} from "./src/request-limits-config.js";
 
 // Re-exported so a consuming plugin (or a test) can reference the
 // security-headers config schema/loader, or wire helmet onto a standalone
@@ -215,6 +228,15 @@ export async function buildApp(
   context: PluginLifecycleContext,
   { loggerStream }: { loggerStream?: NodeJS.WritableStream } = {},
 ) {
+  // Feature #71: REQUEST_BODY_LIMIT_BYTES/REQUEST_TIMEOUT_MS must be known
+  // *before* `Fastify(...)` is constructed — unlike every other config this
+  // function loads below (rate limit, security headers, CORS, cookies),
+  // `bodyLimit`/`requestTimeout` are Fastify constructor options, not
+  // something a `register*()` call can apply after the instance already
+  // exists. See ./src/request-limits-config.ts's module docs for the exact
+  // defaults and why they diverge from Fastify's own upstream defaults.
+  const requestLimits = loadRequestLimitsConfig();
+
   const built = Fastify({
     // Feature #108, step 1: a fresh, cryptographically-strong ID for every
     // incoming request, generated *before* any hook runs so it's available
@@ -231,6 +253,18 @@ export async function buildApp(
       context: { module: "http" },
       ...(loggerStream ? { stream: loggerStream } : {}),
     }),
+    // Feature #71: reject any request body larger than
+    // REQUEST_BODY_LIMIT_BYTES with a 413 before it ever reaches a route
+    // handler (Fastify enforces this itself, at the content-type-parser
+    // level, streaming-checked as the body arrives — never buffering past
+    // the limit first) — see ./src/request-limits-config.ts.
+    bodyLimit: requestLimits.REQUEST_BODY_LIMIT_BYTES,
+    // Feature #71: destroy the underlying socket if a client hasn't sent a
+    // complete request within REQUEST_TIMEOUT_MS (Node's own
+    // `server.requestTimeout`, surfaced by Fastify) — guards against a slow
+    // client (or slowloris-style attack) holding a connection open
+    // indefinitely — see ./src/request-limits-config.ts.
+    requestTimeout: requestLimits.REQUEST_TIMEOUT_MS,
   });
 
   // Feature #108, step 2: echo the generated request id back as the
