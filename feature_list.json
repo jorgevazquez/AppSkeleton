@@ -1168,7 +1168,7 @@
       "Write a test asserting a 3-level namespace hierarchy produces the correct nested structure"
     ],
     "depends_on": [87],
-    "passes": false
+    "passes": true
   },
   {
     "id": 92,
