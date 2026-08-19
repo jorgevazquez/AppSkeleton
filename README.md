@@ -45,3 +45,8 @@ npm run format:check  # prettier --check
 - `feature_list.json` — the build backlog, source of truth for what's done.
 - `claude-progress.txt` — running development log.
 - `python3 dev-agent.py status` — see current progress at a glance.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for branch/commit conventions,
+the feature workflow, lint/test requirements, and PR expectations.
