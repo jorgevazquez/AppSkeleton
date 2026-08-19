@@ -1361,7 +1361,7 @@
       "Confirm it flags a deliberately committed fake secret in a scratch test and is removed before merging"
     ],
     "depends_on": [103],
-    "passes": false
+    "passes": true
   },
   {
     "id": 107,
