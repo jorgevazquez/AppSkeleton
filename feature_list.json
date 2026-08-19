@@ -1054,7 +1054,7 @@
       "Write a test asserting the generated table includes every shipped plugin's declared capabilities"
     ],
     "depends_on": [74, 17, 31, 45, 57],
-    "passes": false
+    "passes": true
   },
   {
     "id": 83,

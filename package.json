@@ -25,6 +25,7 @@
     "create-plugin": "tsx src/plugins/plugin-builder/src/cli.ts create",
     "introspect": "tsx src/cli/introspect.ts",
     "generate:manifest-schema": "tsx src/plugins/plugin-builder/src/generate-manifest-json-schema.ts",
+    "generate:capability-index": "tsx src/plugins/plugin-builder/src/generate-capability-index.ts",
     "prepare": "husky"
   },
   "lint-staged": {
