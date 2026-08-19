@@ -21,15 +21,35 @@
  */
 import type { PluginManifest } from "../../../core/manifest.js";
 
+/**
+ * The capability ids a freshly scaffolded plugin should declare upfront —
+ * both fields optional (each defaults to `[]`, the same "explicit-empty"
+ * shape `docs/ai-plugin-authoring.md` §2 requires). Feature #76's CLI
+ * collects these via `--provides`/`--requires` flags (or an interactive
+ * prompt) and passes them straight through; validity (the
+ * `CAPABILITY_PATTERN` grammar, no duplicates) is not re-checked here —
+ * `generatePlugin` re-validates the whole rendered manifest through the
+ * kernel's own `validateManifest()` before writing anything, so a bad
+ * capability string is caught there rather than duplicated as a second
+ * check in this template.
+ */
+export interface PluginCapabilitiesInput {
+  provides?: string[];
+  requires?: string[];
+}
+
 /** The `plugin.json` this generator emits for a freshly scaffolded plugin, before validation. */
-export function buildPluginManifest(id: string): PluginManifest {
+export function buildPluginManifest(
+  id: string,
+  capabilities?: PluginCapabilitiesInput,
+): PluginManifest {
   return {
     id,
     version: "0.1.0",
     depends_on: {},
     capabilities: {
-      provides: [],
-      requires: [],
+      provides: capabilities?.provides ?? [],
+      requires: capabilities?.requires ?? [],
     },
     entry_point: "index.ts",
   };

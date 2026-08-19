@@ -52,6 +52,7 @@ import {
   renderPluginManifestJson,
   renderPluginReadme,
   renderSrcPlaceholder,
+  type PluginCapabilitiesInput,
 } from "./plugin-templates.js";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -73,6 +74,17 @@ export interface GeneratePluginOptions {
    * comment and `README.md`.
    */
   description: string;
+  /**
+   * Capability ids to declare in `plugin.json`'s `capabilities` field —
+   * `provides`: capability ids this plugin intends to implement;
+   * `requires`: capability ids it will obtain from the broker. Both
+   * optional, each defaulting to `[]` (matching feature #75's original
+   * always-empty behavior when omitted). Not otherwise re-checked here —
+   * see {@link buildPluginManifest}'s docs — bad ids surface as the same
+   * `Err(ValidationError)` the id/description checks below produce, via
+   * this function's `validateManifest()` re-check.
+   */
+  capabilities?: PluginCapabilitiesInput;
   /** Root directory under which `<id>/` is created for the plugin's own files. Default: {@link DEFAULT_PLUGINS_ROOT}. */
   pluginsRoot?: string;
   /** Root directory under which `<id>/` is created for the plugin's test file. Default: {@link DEFAULT_TESTS_ROOT}. */
@@ -158,7 +170,7 @@ export async function generatePlugin(
     );
   }
 
-  const manifest = buildPluginManifest(id);
+  const manifest = buildPluginManifest(id, options.capabilities);
 
   // The template only ever produces field *values* the schema already accepts (§2), but this
   // re-validation is what actually backs feature #75 step 2's requirement — the generator
