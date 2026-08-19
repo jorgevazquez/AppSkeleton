@@ -1426,7 +1426,7 @@
       "Write a test (can be a script-driven integration test) sending SIGTERM and asserting clean exit within the timeout"
     ],
     "depends_on": [12, 18],
-    "passes": false
+    "passes": true
   },
   {
     "id": 112,
