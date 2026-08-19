@@ -1,9 +1,19 @@
 import { describe, expect, it } from "vitest";
+import { addRoleParent } from "../../../src/plugins/rbac/src/hierarchy.js";
 import { can, matchesPermission, type PolicyStore } from "../../../src/plugins/rbac/src/policy.js";
-import type { RolePermission, UserRole } from "../../../src/plugins/rbac/src/types.js";
+import type {
+  RoleHierarchy,
+  RolePermission,
+  UserRole,
+} from "../../../src/plugins/rbac/src/types.js";
+import { ValidationError } from "../../../src/core/errors.js";
 
-function store(userRoles: UserRole[], rolePermissions: RolePermission[]): PolicyStore {
-  return { userRoles, rolePermissions };
+function store(
+  userRoles: UserRole[],
+  rolePermissions: RolePermission[],
+  roleParents: readonly RoleHierarchy[] = [],
+): PolicyStore {
+  return { userRoles, rolePermissions, roleParents };
 }
 
 describe("can() — allow", () => {
@@ -154,6 +164,109 @@ describe("can() — conflicting-role scenarios", () => {
     );
 
     expect(can(s, "alice", "purge", "wiki")).toBe(true);
+  });
+});
+
+describe("can() — role hierarchy / inheritance", () => {
+  it("allows via a 2-level hierarchy: user holds the child role, permission is granted only to the parent role", () => {
+    const s = store(
+      [{ userId: "alice", roleId: "wiki-editor" }],
+      [{ roleId: "viewer", permissionId: "wiki:read" }],
+      [{ roleId: "wiki-editor", parentRoleId: "viewer" }],
+    );
+
+    expect(can(s, "alice", "read", "wiki")).toBe(true);
+  });
+
+  it("still denies a permission neither the child role nor its parent grants", () => {
+    const s = store(
+      [{ userId: "alice", roleId: "wiki-editor" }],
+      [{ roleId: "viewer", permissionId: "wiki:read" }],
+      [{ roleId: "wiki-editor", parentRoleId: "viewer" }],
+    );
+
+    expect(can(s, "alice", "delete", "wiki")).toBe(false);
+  });
+
+  it("inheriting from a parent is additive — the child role's own direct grants still apply", () => {
+    const s = store(
+      [{ userId: "alice", roleId: "wiki-editor" }],
+      [
+        { roleId: "viewer", permissionId: "wiki:read" },
+        { roleId: "wiki-editor", permissionId: "wiki:edit" },
+      ],
+      [{ roleId: "wiki-editor", parentRoleId: "viewer" }],
+    );
+
+    expect(can(s, "alice", "read", "wiki")).toBe(true);
+    expect(can(s, "alice", "edit", "wiki")).toBe(true);
+  });
+
+  it("resolves a multi-level chain transitively, not just the immediate parent", () => {
+    const s = store(
+      [{ userId: "alice", roleId: "senior-editor" }],
+      [{ roleId: "viewer", permissionId: "wiki:read" }],
+      [
+        { roleId: "senior-editor", parentRoleId: "wiki-editor" },
+        { roleId: "wiki-editor", parentRoleId: "viewer" },
+      ],
+    );
+
+    expect(can(s, "alice", "read", "wiki")).toBe(true);
+  });
+
+  it("a wildcard grant on a parent role is inherited too", () => {
+    const s = store(
+      [{ userId: "alice", roleId: "wiki-editor" }],
+      [{ roleId: "wiki-admin", permissionId: "wiki:*" }],
+      [{ roleId: "wiki-editor", parentRoleId: "wiki-admin" }],
+    );
+
+    expect(can(s, "alice", "purge", "wiki")).toBe(true);
+  });
+
+  it("does not grant a permission held only by an unrelated role that is not an ancestor", () => {
+    const s = store(
+      [{ userId: "alice", roleId: "wiki-editor" }],
+      [{ roleId: "commenter", permissionId: "wiki:comment" }],
+      [{ roleId: "wiki-editor", parentRoleId: "viewer" }],
+    );
+
+    expect(can(s, "alice", "comment", "wiki")).toBe(false);
+  });
+
+  it("rejects a cyclic hierarchy at construction time via addRoleParent, instead of letting can() ever see it", () => {
+    const roleParents: RoleHierarchy[] = [{ roleId: "wiki-editor", parentRoleId: "viewer" }];
+    addRoleParent(roleParents, "senior-editor", "wiki-editor");
+
+    // viewer -> senior-editor would close the loop
+    // viewer -> senior-editor -> wiki-editor -> viewer.
+    expect(() => addRoleParent(roleParents, "viewer", "senior-editor")).toThrow(ValidationError);
+    // A direct self-reference is rejected the same way.
+    expect(() => addRoleParent(roleParents, "wiki-editor", "wiki-editor")).toThrow(ValidationError);
+
+    // The rejected edges never entered the store, so resolution is
+    // unaffected and still reflects only the valid 3-level chain.
+    const s = store(
+      [{ userId: "alice", roleId: "senior-editor" }],
+      [{ roleId: "viewer", permissionId: "wiki:read" }],
+      roleParents,
+    );
+    expect(can(s, "alice", "read", "wiki")).toBe(true);
+  });
+
+  it("can() still terminates and produces a sane result if a cyclic hierarchy is hand-seeded directly (bypassing addRoleParent)", () => {
+    const s = store(
+      [{ userId: "alice", roleId: "a" }],
+      [{ roleId: "b", permissionId: "wiki:read" }],
+      [
+        { roleId: "a", parentRoleId: "b" },
+        { roleId: "b", parentRoleId: "a" },
+      ],
+    );
+
+    expect(can(s, "alice", "read", "wiki")).toBe(true);
+    expect(can(s, "alice", "delete", "wiki")).toBe(false);
   });
 });
 

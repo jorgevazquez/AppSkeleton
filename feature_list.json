@@ -555,7 +555,7 @@
       "Write unit tests for a 2-level hierarchy and a rejected cyclic hierarchy"
     ],
     "depends_on": [33],
-    "passes": false
+    "passes": true
   },
   {
     "id": 44,
