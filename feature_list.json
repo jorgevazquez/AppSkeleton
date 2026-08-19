@@ -1117,7 +1117,7 @@
       "Write integration tests for each CRUD operation including not-found and duplicate-slug error paths"
     ],
     "depends_on": [86, 20],
-    "passes": false
+    "passes": true
   },
   {
     "id": 88,
