@@ -1017,7 +1017,7 @@
       "Write an integration test asserting hello-world loads without modification after regeneration"
     ],
     "depends_on": [75, 12],
-    "passes": false
+    "passes": true
   },
   {
     "id": 80,
