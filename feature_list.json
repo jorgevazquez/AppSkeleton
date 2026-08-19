@@ -1091,7 +1091,7 @@
       "Write a unit test asserting the plugin is discoverable and valid"
     ],
     "depends_on": [4, 6],
-    "passes": false
+    "passes": true
   },
   {
     "id": 86,
