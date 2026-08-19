@@ -1614,3 +1614,23 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - plugin-builder's plugin.json is intentionally minimal: no capabilities.provides/requires and no depends_on, since at this stage it's a scaffolding/CLI meta-tool (create-plugin generator, JSON Schema, linter — see spec.md section 5) rather than something that exposes or consumes kernel-brokered runtime capabilities. Future features (the JSON Schema, create-plugin CLI, static linter, index.ts lifecycle entry) can extend this manifest as needed.
 - entry_point is set to index.ts even though that file doesn't exist yet — per docs/plugin-conventions.md and registry.ts, entry_point existence on disk is not checked at scan/validation time, so a manifest-only scaffold is valid (same state several other shipped plugins are/were in).
 - The wiki plugin is still missing its plugin.json (unrelated feature, not touched here) — the kernel bootstrap log still shows found:5/skipped:1 after this change, previously found:4/skipped:2.
+## 2026-08-18 17:43 — Feature #74: Publish the plugin.json JSON Schema for external/programmatic reuse
+
+### What was done:
+- Added zod-to-json-schema + ajv as dependencies.
+- src/plugins/plugin-builder/src/manifest-json-schema.ts: generatePluginManifestJsonSchema() derives a draft-07 JSON Schema straight from src/core/manifest.ts's PluginManifestSchema (feature #4, the single source of truth) via zod-to-json-schema, then adds uniqueItems: true to capabilities.provides/requires (an exact JSON-Schema equivalent of the kernel's duplicate-capability superRefine check).
+- src/plugins/plugin-builder/src/generate-manifest-json-schema.ts: CLI generator (npm run generate:manifest-schema) that writes the checked-in src/plugins/plugin-builder/schemas/plugin-manifest.schema.json; also exports renderManifestJsonSchema()/MANIFEST_JSON_SCHEMA_PATH so tests can assert the committed file is never stale.
+- tests/fixtures/plugin-manifests.ts: extracted the valid/invalid plugin.json fixtures (previously only inline in tests/core/manifest.test.ts) into a shared module; tests/core/manifest.test.ts now imports validManifest() from it instead of redefining it.
+- tests/plugins/plugin-builder/manifest-schema.test.ts: (1) asserts the committed schema file byte-for-byte matches a fresh generatePluginManifestJsonSchema() call (drift/staleness check), and (2) runs every shared MANIFEST_FIXTURES entry through both an ajv-compiled copy of the exported schema and the kernel's validateManifest(), asserting they agree.
+- Added .prettierignore for the generated schema JSON file, since its canonical formatting is the generator's own JSON.stringify(..., null, 2), not prettier's collapsed-array JSON style.
+
+### Testing:
+- npm run lint: clean.
+- npm run build (tsc): clean — had to switch the ajv import from 'import Ajv from "ajv"' to 'import { Ajv } from "ajv"' to work around a known ajv v8 typings issue under moduleResolution: NodeNext + esModuleInterop (TS2351 'not constructable').
+- npm test (full suite): 1303 passed | 49 skipped, 0 failed (up from 1268 passed pre-change; +35 new tests: 1 drift check + 34 fixture-parity cases).
+- Manually inspected the generated schema output against PluginManifestSchema: patterns for id/version/entry_point/capability-grammar, required list, and additionalProperties:false all matched exactly.
+
+### Notes:
+- One deliberate, documented gap: depends_on's semver *range* values (e.g. '^1.2.3') are validated in the kernel via the semver package's validRange(), not a regex, so they have no static JSON Schema equivalent. The exported schema accepts any non-empty string there rather than hand-rolling an approximate semver-range regex (which would itself be exactly the hand-duplicated second source of truth this feature says to avoid). This is documented in manifest-json-schema.ts's docstring and flagged per-fixture via MANIFEST_FIXTURES' schemaParity: false.
+- Did NOT create src/plugins/plugin-builder/plugin.json (that's feature #73, not a dependency of #74) — this feature only adds files under src/plugins/plugin-builder/src/ and /schemas/, so the plugin directory is still correctly skipped by the plugin loader (missing_manifest) until #73 lands.
+- Future agents: if src/core/manifest.ts's PluginManifestSchema ever changes, run 'npm run generate:manifest-schema' to regenerate the committed schema file — the drift test in manifest-schema.test.ts will fail otherwise.
