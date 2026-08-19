@@ -605,13 +605,99 @@ describe.runIf(mysqlReachable)("wiki HTTP routes — end-to-end over real HTTP (
     });
 
     expect(diff.statusCode).toBe(200);
-    const { lines } = diff.json() as { lines: { type: string; value: string }[] };
+    const { lines, html } = diff.json() as {
+      lines: { type: string; value: string }[];
+      html: string;
+    };
     expect(lines).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: "removed", value: "line two" }),
         expect.objectContaining({ type: "added", value: "line two changed" }),
       ]),
     );
+
+    // Feature #90 step 2: the diff is also rendered to safe HTML via
+    // render:template, with a class per line marking it added/removed/
+    // unchanged — not just returned as raw JSON edit-script data.
+    expect(html).toContain('<div class="diff-line diff-removed">line two</div>');
+    expect(html).toContain('<div class="diff-line diff-added">line two changed</div>');
+    expect(html).toContain('<div class="diff-line diff-unchanged">line one</div>');
+
+    await apiGatewayModule.onDisable();
+  });
+
+  it("diff: an XSS-style payload in a revision's content is neutralized in the rendered HTML (feature #90 step 2)", async () => {
+    const app = await loadServer();
+    const { sidCookie } = await loginAs(app, "editor");
+    const { cookie, token } = await obtainCsrf(app, sidCookie);
+
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/v1/wiki/pages",
+      headers: { cookie, "x-csrf-token": token },
+      payload: {
+        namespaceId: NAMESPACE_ID,
+        slug: "diff-xss-target",
+        title: "Diff XSS Target",
+        content: "safe line",
+      },
+    });
+    const pageId = (create.json() as { id: number }).id;
+
+    // Feature #89: an edit snapshots the *previous* content into
+    // wiki_revisions before applying the change — so this first edit's
+    // resulting revision row captures "safe line" (the create-time
+    // content), matching the "identifies additions and deletions" test
+    // above's own from/to construction.
+    await app.inject({
+      method: "PATCH",
+      url: `/api/v1/wiki/pages/${pageId}`,
+      headers: { cookie, "x-csrf-token": token },
+      payload: {
+        content: '<script>alert(document.cookie)</script>\n<img src=x onerror="alert(1)">',
+      },
+    });
+    const historyRes = await app.inject({
+      method: "GET",
+      url: `/api/v1/wiki/pages/${pageId}/revisions`,
+      headers: { cookie: sidCookie },
+    });
+    const fromRevisionId = (
+      (historyRes.json() as { revisions: { id: number }[] }).revisions[0] as { id: number }
+    ).id;
+
+    // A second edit's resulting revision row now captures the malicious
+    // payload set above, so it's a real, retrievable wiki_revisions row on
+    // the "to" side of the diff, exactly like the non-XSS diff test.
+    await app.inject({
+      method: "PATCH",
+      url: `/api/v1/wiki/pages/${pageId}`,
+      headers: { cookie, "x-csrf-token": token },
+      payload: { content: "safe line again" },
+    });
+    const historyRes2 = await app.inject({
+      method: "GET",
+      url: `/api/v1/wiki/pages/${pageId}/revisions`,
+      headers: { cookie: sidCookie },
+    });
+    const toRevisionId = (
+      (historyRes2.json() as { revisions: { id: number }[] }).revisions[0] as { id: number }
+    ).id;
+
+    const diff = await app.inject({
+      method: "GET",
+      url: `/api/v1/wiki/pages/${pageId}/diff?from=${fromRevisionId}&to=${toRevisionId}`,
+      headers: { cookie: sidCookie },
+    });
+
+    expect(diff.statusCode).toBe(200);
+    const { html } = diff.json() as { html: string };
+    // No raw HTML injection from diffed content — the payload text survives
+    // only as HTML-escaped text inside a fixed diff-line wrapper.
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain('onerror="alert(1)"');
+    expect(html).toContain("&lt;script&gt;alert(document.cookie)&lt;/script&gt;");
+    expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
 
     await apiGatewayModule.onDisable();
   });

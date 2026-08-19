@@ -2,20 +2,41 @@
  * Pure, dependency-free line-based diff between two strings — feature #94's
  * ("Wiki HTTP routes via api-gateway") own minimal scope for the `diff`
  * HTTP route: a real, working implementation to register today, so
- * `GET /api/v1/wiki/pages/:id/diff` has something genuine to serve. The
- * dedicated feature #90 ("Diff view between two revisions") is expected to
- * build on this — e.g. rendering the result safely through html-renderer —
- * without needing to touch the algorithm itself.
+ * `GET /api/v1/wiki/pages/:id/diff` has something genuine to serve.
  *
- * No I/O, no wiki-specific types — this module only ever sees two raw
- * strings (typically two `Revision.content`/`Page.content` values, see
- * `../index.ts`'s diff route handler) and returns a line-by-line edit
- * script. Kept standalone/pure specifically so it can be unit-tested with
- * hand-built fixtures, no database or capability plumbing required (the
- * same "zero-I/O logic tested in isolation" precedent `markdown.ts`'s
- * `parseMarkdown`/`page-tree.ts`'s `buildNamespaceTree` already set in this
- * plugin).
+ * Feature #90 ("Diff view between two revisions") builds directly on top of
+ * that algorithm without touching it: {@link diffLines} (step 1, unchanged)
+ * plus {@link renderDiffToHtml} (step 2 — a safe HTML rendering of a
+ * {@link diffLines} result, via html-renderer's real `render:template`
+ * capability).
+ *
+ * ## Step 2: safe rendering, the same "data, not a raw string" shape
+ * `markdown.ts` already established
+ *
+ * A diff's line *values* are exactly as attacker-controlled as a page's
+ * Markdown source is (`diffLines` is fed two `Revision.content`/
+ * `Page.content` values — anyone who can create or edit a page controls
+ * both). {@link renderDiffToHtml} therefore follows `markdown.ts`'s
+ * `compileMarkdownTemplate`/`renderMarkdownToHtml` pattern exactly: it
+ * builds an html-renderer template *source* string out of nothing but this
+ * module's own fixed literal tag/class text (`<div class="diff-line
+ * diff-added">`, ...) plus one `{{lineN}}` placeholder per diff line, and a
+ * separate {@link TemplateContext} mapping each placeholder to that line's
+ * raw, unescaped `value`. No diffed line value is ever concatenated into
+ * the template source itself, so a line of content that happens to look
+ * like `<script>...</script>` or `{{#each secrets}}...{{/each}}` can never
+ * be interpreted as markup or template syntax — it only ever flows through
+ * as an opaque `{{lineN}}` variable value, which html-renderer's compile-
+ * time HTML-context scanner (`html-context.ts`) escapes with `escapeHtml`
+ * the same way it would for any other template variable placed in a tag
+ * body. This module supplies no escaping of its own, exactly like
+ * `markdown.ts` — every safety property comes from feature #47's existing,
+ * independently-tested auto-escaping machinery.
  */
+
+import type { ValidationError } from "../../../core/errors.js";
+import type { Result } from "../../../core/types.js";
+import type { RenderTemplateCapability, TemplateContext } from "../../html-renderer/index.js";
 
 /** Whether a line in the diff was present in both inputs, only the "before" side, or only the "after" side. */
 export type DiffLineType = "unchanged" | "added" | "removed";
@@ -93,4 +114,69 @@ export function diffLines(before: string, after: string): DiffLine[] {
     j++;
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Step 2: diff -> html-renderer template source + data context
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixed, literal CSS class per {@link DiffLineType} — never derived from
+ * diffed content, only ever from this closed union's three known member
+ * values, so it is safe to splice directly into the template *source*
+ * string (see this module's doc comment's "Step 2" section).
+ */
+const DIFF_LINE_CLASS: Record<DiffLineType, string> = {
+  unchanged: "diff-line diff-unchanged",
+  added: "diff-line diff-added",
+  removed: "diff-line diff-removed",
+};
+
+/**
+ * Convert a {@link diffLines} result into an html-renderer template source
+ * (built entirely from this module's own fixed literal tag/class text) plus
+ * a {@link TemplateContext} carrying every diffed line's raw text as a
+ * `{{lineN}}` variable value. Mirrors `markdown.ts`'s
+ * `compileMarkdownTemplate` — see this module's doc comment for why this
+ * shape is what keeps a diffed line's content from ever being interpreted
+ * as markup or template syntax.
+ */
+export function compileDiffTemplate(lines: readonly DiffLine[]): {
+  readonly source: string;
+  readonly context: TemplateContext;
+} {
+  const context: TemplateContext = {};
+
+  const body = lines
+    .map((line, index) => {
+      const placeholder = `line${index}`;
+      context[placeholder] = line.value;
+      return `<div class="${DIFF_LINE_CLASS[line.type]}">{{${placeholder}}}</div>`;
+    })
+    .join("");
+
+  return { source: `<div class="diff">${body}</div>`, context };
+}
+
+/**
+ * Render a {@link diffLines} result to safe HTML through html-renderer's
+ * real `render:template` capability (step 2). `render` is that
+ * capability's own `render()` function — a caller obtains it via
+ * `context.capabilities.obtain<RenderTemplateCapability>("render:template")`
+ * and passes its `.render` method straight through, exactly like
+ * `markdown.ts`'s `renderMarkdownToHtml` takes its `render` parameter
+ * rather than reaching for a module-level singleton.
+ *
+ * Returns the same `Result<string, ValidationError>` shape `render()`
+ * itself returns — in practice always `Ok`, since every template this
+ * function generates is built from fixed, well-formed literal tag text
+ * (see {@link compileDiffTemplate}), but the `Result` is still propagated
+ * rather than unwrapped here so a caller never has to guess.
+ */
+export function renderDiffToHtml(
+  lines: readonly DiffLine[],
+  render: RenderTemplateCapability["render"],
+): Result<string, ValidationError> {
+  const { source, context } = compileDiffTemplate(lines);
+  return render(source, context);
 }

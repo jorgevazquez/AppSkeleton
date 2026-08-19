@@ -1156,7 +1156,7 @@
       "Write a test asserting additions/deletions are correctly identified for a known before/after pair"
     ],
     "depends_on": [89],
-    "passes": false
+    "passes": true
   },
   {
     "id": 91,
