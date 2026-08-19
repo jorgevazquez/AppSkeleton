@@ -199,6 +199,45 @@ const REQUIRED_PERMISSION_PATTERN = new RegExp(
   `^(${REQUIRED_PERMISSION_SEGMENT}):(${REQUIRED_PERMISSION_SEGMENT})$`,
 );
 
+/**
+ * Metadata captured for every route successfully registered via a
+ * {@link createRouteRegistrar} instance's `registerRoute()` — feature #70
+ * ("OpenAPI documentation auto-generated from registered routes") reads this
+ * list to derive `/api/v1/openapi.json`'s document (see `./openapi.ts`);
+ * nothing in this module itself consumes it. `path` is the *final*,
+ * already-versioned path (e.g. `"/api/v1/widgets/:id"`, matching exactly
+ * what `app.route()` was actually called with) — not the caller's raw
+ * `options.path`.
+ */
+export interface RegisteredRouteInfo {
+  readonly method: HttpMethod;
+  readonly path: string;
+  readonly schema: RouteSchema;
+}
+
+/**
+ * What `http:route` exposes for *introspecting* already-registered routes —
+ * merged into `HttpRouteCapability` alongside `getApp()`/`registerRoute()`
+ * in `../index.ts`. Feature #70's `/api/v1/openapi.json` handler calls
+ * {@link getRegisteredRoutes} at *request* time (not registration time), so
+ * it always reflects every route registered so far — including ones
+ * registered by plugins that load, and therefore call `registerRoute()`,
+ * after api-gateway's own `onEnable` — since by the time any HTTP request
+ * can actually reach this server, the entire plugin-load pass has already
+ * completed (the same "request-time, not onEnable-time" reasoning
+ * `./rbac-protection.ts`'s module docs already spell out for
+ * `rbac:check`).
+ */
+export interface HttpRouteIntrospectionCapability {
+  /**
+   * Every route successfully registered so far via this registrar's
+   * `registerRoute()`, in registration order. Returns a fresh array
+   * snapshot on every call — mutating the returned array never affects this
+   * module's own internal state.
+   */
+  getRegisteredRoutes(): readonly RegisteredRouteInfo[];
+}
+
 /** What `http:route` exposes for *registering* new routes — merged into `HttpRouteCapability` alongside `getApp()` in `../index.ts`. */
 export interface HttpRouteRegistrationCapability {
   /**
@@ -360,6 +399,22 @@ function parseRequiredPermission(
 }
 
 /**
+ * What {@link createRouteRegistrar} returns: the registration surface
+ * (feature #59) plus the introspection surface (feature #70) a single
+ * registrar instance accumulates, plus a `clearRegisteredRoutes()` escape
+ * hatch `../index.ts`'s `onEnable` uses to reset the registry whenever it
+ * builds a *new* Fastify instance (see that call site's docs on why —
+ * `registerRoute`'s function identity must stay stable across an
+ * enable/disable/re-enable cycle since it's registered with the broker once
+ * at module scope, but the set of routes it has seen must not accumulate
+ * across instances the old routes no longer belong to).
+ */
+export type HttpRouteRegistrar = HttpRouteRegistrationCapability &
+  HttpRouteIntrospectionCapability & {
+    clearRegisteredRoutes(): void;
+  };
+
+/**
  * Build the `registerRoute` implementation `../index.ts` merges into its
  * `http:route` capability object. `getApp` is passed in (rather than a live
  * instance) so this module can be constructed once at module scope, exactly
@@ -368,7 +423,9 @@ function parseRequiredPermission(
  * "before onEnable" error) at actual `registerRoute()` call time, never at
  * construction time.
  */
-export function createRouteRegistrar(getApp: () => ApiGatewayApp): HttpRouteRegistrationCapability {
+export function createRouteRegistrar(getApp: () => ApiGatewayApp): HttpRouteRegistrar {
+  const registeredRoutes: RegisteredRouteInfo[] = [];
+
   return {
     registerRoute(options: RegisterRouteOptions): void {
       assertDeclaresRequestAndResponseSchema(options);
@@ -411,6 +468,25 @@ export function createRouteRegistrar(getApp: () => ApiGatewayApp): HttpRouteRegi
         handler: options.handler,
         config: Object.keys(routeConfig).length > 0 ? routeConfig : undefined,
       } as AppRouteOptions);
+
+      // Recorded only after app.route() above has returned without
+      // throwing — a route Fastify itself rejected (e.g. a duplicate path,
+      // or ajv choking on a malformed-but-present schema keyword) must never
+      // show up in getRegisteredRoutes()/the OpenAPI document, since it was
+      // never actually mounted (feature #70).
+      registeredRoutes.push({
+        method: options.method,
+        path: versionedPath,
+        schema: options.schema,
+      });
+    },
+
+    getRegisteredRoutes(): readonly RegisteredRouteInfo[] {
+      return [...registeredRoutes];
+    },
+
+    clearRegisteredRoutes(): void {
+      registeredRoutes.length = 0;
     },
   };
 }

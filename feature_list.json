@@ -902,7 +902,7 @@
       "Write a test asserting the generated document includes a route registered by a fixture plugin"
     ],
     "depends_on": [59, 62],
-    "passes": false
+    "passes": true
   },
   {
     "id": 71,

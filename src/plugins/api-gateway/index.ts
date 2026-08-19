@@ -41,6 +41,12 @@ import { loadCorsConfig } from "./src/cors-config.js";
 import { registerCors } from "./src/cors.js";
 import { registerCsrfProtection } from "./src/csrf.js";
 import { registerErrorHandling } from "./src/error-handler.js";
+import {
+  buildOpenApiDocument,
+  DEFAULT_OPENAPI_INFO_VERSION,
+  DEFAULT_OPENAPI_TITLE,
+  renderApiDocsHtml,
+} from "./src/openapi.js";
 import { loadRateLimitConfig } from "./src/rate-limit-config.js";
 import { registerRateLimiting } from "./src/rate-limit.js";
 import { registerRbacProtection } from "./src/rbac-protection.js";
@@ -48,6 +54,9 @@ import { registerRequestId } from "./src/request-id.js";
 import { loadRequestLimitsConfig } from "./src/request-limits-config.js";
 import {
   createRouteRegistrar,
+  DEFAULT_API_VERSION,
+  type HttpRouteIntrospectionCapability,
+  type HttpRouteRegistrar,
   type HttpRouteRegistrationCapability,
 } from "./src/route-capability.js";
 import { loadSecurityHeadersConfig } from "./src/security-headers-config.js";
@@ -160,14 +169,38 @@ export {
 // creates no runtime coupling.
 export type {
   HttpMethod,
+  HttpRouteIntrospectionCapability,
   HttpRouteRegistrationCapability,
   JsonSchemaObject,
   ParsedRequiredPermission,
+  RegisteredRouteInfo,
   RegisterRouteOptions,
   RouteHandler,
   RouteRequestSchema,
   RouteSchema,
 } from "./src/route-capability.js";
+
+// Re-exported so a test (or a future plugin) can build/render an OpenAPI
+// document from a `RegisteredRouteInfo[]` without reaching into this
+// plugin's `src/` internals — feature #70, see `./src/openapi.js` for the
+// full contract. `../../../src/server/index.ts` mounts no route for this
+// itself: `onEnable` below registers `GET /api/v1/openapi.json` and
+// `GET /api/v1/docs` directly, through the same `registerRoute()` every
+// other route in this codebase goes through.
+export {
+  buildOpenApiDocument,
+  DEFAULT_OPENAPI_INFO_VERSION,
+  DEFAULT_OPENAPI_TITLE,
+  OPENAPI_VERSION,
+  renderApiDocsHtml,
+  type BuildOpenApiDocumentOptions,
+  type OpenApiDocument,
+  type OpenApiOperation,
+  type OpenApiParameter,
+  type OpenApiPathItem,
+  type OpenApiRequestBody,
+  type OpenApiResponse,
+} from "./src/openapi.js";
 
 // Re-exported so a consuming plugin (or a test) can wire the RBAC
 // `preHandler` hook onto a standalone test instance, or override how it
@@ -364,7 +397,8 @@ export type ApiGatewayApp = Awaited<ReturnType<typeof buildApp>>;
  * to mount their own endpoints on it (feature #59's `registerRoute()`, see
  * `./src/route-capability.ts`).
  */
-export interface HttpRouteCapability extends HttpRouteRegistrationCapability {
+export interface HttpRouteCapability
+  extends HttpRouteRegistrationCapability, HttpRouteIntrospectionCapability {
   /**
    * The live Fastify instance constructed in `onEnable`. Throws if called
    * before `onEnable` has run (which should never happen for a caller
@@ -407,8 +441,102 @@ export const provides: Readonly<Record<string, unknown>> = {
   "http:route": {
     getApp,
     registerRoute: routeRegistrar.registerRoute,
+    getRegisteredRoutes: routeRegistrar.getRegisteredRoutes,
   } satisfies HttpRouteCapability,
 };
+
+/** `registerRoute()`'s raw path (pre-versioning) for `/api/v1/openapi.json` — feature #70, step 1. */
+const OPENAPI_JSON_ROUTE_PATH = "/openapi.json";
+
+/** `registerRoute()`'s raw path (pre-versioning) for `/api/v1/docs` — feature #70, step 2. */
+const API_DOCS_ROUTE_PATH = "/docs";
+
+/** An explicit "no query/body input accepted" schema — reused by both routes below, neither of which takes any request input. */
+const NO_INPUT_QUERYSTRING_SCHEMA = {
+  type: "object",
+  properties: {},
+  additionalProperties: false,
+} as const;
+
+/**
+ * Register `GET /api/v1/openapi.json` (feature #70 step 1) and
+ * `GET /api/v1/docs` (step 2) — through `registrar.registerRoute()` itself,
+ * the same path every other route in this codebase is mounted through, so
+ * both automatically get the usual versioning/CSRF/rate-limit/security-
+ * header treatment (CSRF is a no-op for GET either way). Neither sets
+ * `requiredPermission` — an API's own documentation surface is
+ * intentionally public, like most REST APIs' `/docs`/spec endpoints.
+ *
+ * Called from `onEnable`, *after* `app` has been assigned — `registerRoute`
+ * resolves the live Fastify instance through `getApp()`, which throws
+ * before `onEnable` has run (see that function's own docs).
+ */
+function registerOpenApiDocumentationRoutes(registrar: HttpRouteRegistrar): void {
+  const versionedOpenApiJsonPath = `/api/${DEFAULT_API_VERSION}${OPENAPI_JSON_ROUTE_PATH}`;
+
+  registrar.registerRoute({
+    method: "GET",
+    path: OPENAPI_JSON_ROUTE_PATH,
+    schema: {
+      querystring: NO_INPUT_QUERYSTRING_SCHEMA,
+      response: {
+        200: {
+          type: "object",
+          description:
+            "An OpenAPI 3 document describing every route registered so far via http:route's registerRoute().",
+        },
+      },
+    },
+    handler: async (_request, reply) => {
+      // Built fresh on every request (not once at registration time) so it
+      // always reflects every route registered so far — including routes
+      // other plugins register in their own onEnable, which runs *after*
+      // this one (see registerOpenApiDocumentationRoutes's own docs and
+      // ./src/route-capability.ts's HttpRouteIntrospectionCapability docs).
+      const document = buildOpenApiDocument(registrar.getRegisteredRoutes(), {
+        title: DEFAULT_OPENAPI_TITLE,
+        version: DEFAULT_OPENAPI_INFO_VERSION,
+      });
+      // Serialized by hand — not returned as a plain object — so Fastify's
+      // schema-based serializer never runs at all. The response schema
+      // above is deliberately loose (an OpenAPI document's `paths` object
+      // has caller-defined keys with no fixed shape fast-json-stringify
+      // could describe), and Fastify only ever applies that serializer to a
+      // non-string payload (see fastify's own reply.js: preSerializationHook
+      // is skipped whenever `typeof payload === "string"`). Sending an
+      // already-`JSON.stringify`'d string with an explicit content-type
+      // guarantees the full document reaches the client untouched.
+      reply.type("application/json; charset=utf-8");
+      return JSON.stringify(document);
+    },
+  });
+
+  registrar.registerRoute({
+    method: "GET",
+    path: API_DOCS_ROUTE_PATH,
+    schema: {
+      querystring: NO_INPUT_QUERYSTRING_SCHEMA,
+      response: {
+        200: {
+          type: "string",
+          description:
+            "A minimal, script-free HTML page listing every registered route, for human browsing.",
+        },
+      },
+    },
+    handler: async (_request, reply) => {
+      const document = buildOpenApiDocument(registrar.getRegisteredRoutes(), {
+        title: DEFAULT_OPENAPI_TITLE,
+        version: DEFAULT_OPENAPI_INFO_VERSION,
+      });
+      // A string payload, same "bypasses schema serialization" reasoning as
+      // the openapi.json handler above — this one because the payload is
+      // HTML, not JSON, and must reach the client byte-for-byte.
+      reply.type("text/html; charset=utf-8");
+      return renderApiDocsHtml(document, versionedOpenApiJsonPath);
+    },
+  });
+}
 
 /**
  * Construct the Fastify instance this plugin owns (see {@link buildApp}),
@@ -432,10 +560,20 @@ export const provides: Readonly<Record<string, unknown>> = {
  */
 export async function onEnable(context: PluginLifecycleContext): Promise<void> {
   app = await buildApp(context);
+
+  // Fresh registry for this newly-built instance (feature #70) — routes
+  // recorded against a *previous* enable/disable cycle's Fastify instance
+  // (e.g. across repeated onEnable calls in the same test file/process,
+  // see route-capability.ts's HttpRouteRegistrar docs) belong to an app
+  // that no longer exists and must not leak into this instance's OpenAPI
+  // document.
+  routeRegistrar.clearRegisteredRoutes();
+  registerOpenApiDocumentationRoutes(routeRegistrar);
 }
 
 /** Release the Fastify instance's own resources and clear the module-level reference. */
 export async function onDisable(): Promise<void> {
   await app?.close();
   app = undefined;
+  routeRegistrar.clearRegisteredRoutes();
 }
