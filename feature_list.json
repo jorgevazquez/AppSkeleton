@@ -1207,7 +1207,7 @@
       "Write an integration test suite hitting every route over real HTTP against a test server instance"
     ],
     "depends_on": [59, 87, 88],
-    "passes": false
+    "passes": true
   },
   {
     "id": 95,

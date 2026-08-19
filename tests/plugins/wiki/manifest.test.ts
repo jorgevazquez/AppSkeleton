@@ -60,14 +60,14 @@ describe("wiki plugin manifest", () => {
     }
   });
 
-  it("does not hard-depend on any plugin by id — it consumes capabilities only, per broker.ts's optional-capability model", async () => {
+  it("hard-depends on api-gateway (feature #94 needs registerRoute() called synchronously in onEnable, unlike rbac:check/db:query/render:template which stay lazily-obtained)", async () => {
     const { entries } = await scanPluginDirectories(PLUGINS_ROOT);
     const entry = entries.find((candidate) => candidate.name === "wiki");
     const result = validateManifest(entry?.manifest);
 
     expect(isOk(result)).toBe(true);
     if (isOk(result)) {
-      expect(result.value.depends_on).toEqual({});
+      expect(result.value.depends_on).toEqual({ "api-gateway": "^0.1.0" });
     }
   });
 });
