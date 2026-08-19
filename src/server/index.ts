@@ -69,7 +69,12 @@
  */
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createInMemoryAuditSink, type InMemoryAuditSink } from "../core/audit.js";
+import {
+  createInMemoryAuditSink,
+  createSwitchableAuditSink,
+  type SwitchableAuditSink,
+} from "../core/audit.js";
+import { createMySqlAuditSink, type AuditLogDbQuery } from "../core/audit-mysql.js";
 import { createCapabilityBroker, type CapabilityBroker } from "../core/broker.js";
 import { loadCoreConfig, type CoreConfig } from "../core/config.js";
 import { isAppError, PluginLoadError } from "../core/errors.js";
@@ -111,7 +116,17 @@ export interface Kernel {
   readonly config: CoreConfig;
   readonly logger: Logger;
   readonly broker: CapabilityBroker;
-  readonly auditSink: InMemoryAuditSink;
+  /**
+   * The kernel's shared audit trail sink. A {@link SwitchableAuditSink}
+   * (feature #29), not a bare `InMemoryAuditSink`: every caller that
+   * captured this exact reference at boot — the broker, every plugin's
+   * `PluginLifecycleContext.auditSink`, and this field itself — keeps
+   * working unchanged whether it's currently forwarding to the in-memory
+   * default or (once `database-mysql` has loaded — see
+   * `attachPersistentAuditSinkIfAvailable`) a real, MySQL-backed sink.
+   * Call `.currentDelegate()` to inspect which one is currently active.
+   */
+  readonly auditSink: SwitchableAuditSink;
   readonly eventBus: EventBus;
   /** The result of discovering and loading every valid plugin — see loader.ts's `PluginLoadResult`. */
   readonly plugins: PluginLoadResult;
@@ -303,6 +318,85 @@ function getHttpApp(plugins: PluginLoadResult, logger: Logger): ApiGatewayApp | 
   return httpRoute.getApp();
 }
 
+/** The plugin id whose `db:query` capability, once loaded, backs the kernel's persistent audit sink (feature #29). */
+const DATABASE_MYSQL_PLUGIN_ID = "database-mysql";
+
+/**
+ * Narrow, structural check for a `db:query`-capability-shaped object — no
+ * runtime dependency on `database-mysql`'s module, just the one method
+ * `audit-mysql.ts`'s `AuditLogDbQuery` needs (mirrors
+ * {@link isHttpRouteCapability}'s same "duck-type the plugin's exported
+ * shape, don't import its real type" precedent).
+ */
+function isAuditLogDbQuery(value: unknown): value is AuditLogDbQuery {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "query" in value &&
+    typeof (value as { query: unknown }).query === "function"
+  );
+}
+
+/**
+ * Feature #29, step 2: "swap [the audit sink] in during bootstrap once
+ * database-mysql has loaded, falling back to in-memory if the DB plugin is
+ * disabled." Called once, after {@link loadPlugins} has finished its whole
+ * pass (so `plugins.loaded`/`plugins.failed` are final for this boot) —
+ * looks up `database-mysql` in `plugins.loaded` (never `plugins.failed`,
+ * whether that's because the plugin directory is missing, its manifest is
+ * invalid, its config is unset, or it's mid-migration and threw — every
+ * one of those collapses to the same "no persistent audit trail this
+ * boot" outcome) and, if found, reads its `db:query` capability straight
+ * off `module.provides` — the same direct-read pattern {@link getHttpApp}
+ * already uses for `api-gateway`'s `http:route`, not the identity-gated
+ * `broker.obtain()` (which is for plugin-to-plugin access; the kernel
+ * itself has no plugin identity to obtain anything as).
+ *
+ * `database-mysql`'s own `onEnable` has already applied its migrations
+ * (including the `database_mysql_audit_log` table this sink writes to)
+ * by the time it appears in `plugins.loaded`, so there is nothing left
+ * for this function to do but build the sink and swap it in. Never
+ * throws: a `database-mysql` plugin whose `db:query` doesn't have the
+ * expected shape is logged and treated exactly like "not loaded" — the
+ * switchable sink's in-memory delegate (installed before plugin load
+ * ever started, see {@link bootstrapKernel}) is left in place either way.
+ */
+function attachPersistentAuditSinkIfAvailable(
+  plugins: PluginLoadResult,
+  auditSink: SwitchableAuditSink,
+  logger: Logger,
+): void {
+  const databaseMysql = plugins.loaded.find((plugin) => plugin.id === DATABASE_MYSQL_PLUGIN_ID);
+  if (!databaseMysql) {
+    return;
+  }
+
+  const dbQuery = databaseMysql.module.provides?.["db:query"];
+  if (!isAuditLogDbQuery(dbQuery)) {
+    logger.warn(
+      { plugin: DATABASE_MYSQL_PLUGIN_ID },
+      `Plugin "${DATABASE_MYSQL_PLUGIN_ID}" loaded but its "db:query" capability does not have the ` +
+        `expected shape; the kernel audit trail will stay in-memory for this boot.`,
+    );
+    return;
+  }
+
+  auditSink.setDelegate(
+    createMySqlAuditSink(dbQuery, {
+      onError: (cause, event) => {
+        logger.warn(
+          { err: cause, event },
+          "Failed to persist an audit event to MySQL; the event was not durably recorded.",
+        );
+      },
+    }),
+  );
+  logger.info(
+    { plugin: DATABASE_MYSQL_PLUGIN_ID },
+    "Kernel audit trail is now persisted to MySQL.",
+  );
+}
+
 /**
  * Construct the whole kernel: load config, build the logger, wire the
  * broker/audit sink/event bus together, discover plugins, and load them in
@@ -316,7 +410,13 @@ export async function bootstrapKernel(options: BootstrapKernelOptions = {}): Pro
     options.logger ?? createLogger({ level: config.LOG_LEVEL, context: { module: "kernel" } });
   const pluginsRoot = options.pluginsRoot ?? DEFAULT_PLUGINS_ROOT;
 
-  const auditSink = createInMemoryAuditSink();
+  // Starts out forwarding to an in-memory sink so every kernel component
+  // built below (the broker, every plugin's lifecycle context) has a
+  // working audit trail from the very first `record()` call — before it's
+  // even known whether `database-mysql` will load successfully this boot.
+  // See `attachPersistentAuditSinkIfAvailable` below (feature #29, step 2)
+  // for how/when this gets swapped to a persistent, MySQL-backed sink.
+  const auditSink = createSwitchableAuditSink(createInMemoryAuditSink());
   const broker = createCapabilityBroker({ auditSink });
   const eventBus = createEventBus();
   const pluginStatus = createPluginStatusTracker();
@@ -340,6 +440,14 @@ export async function bootstrapKernel(options: BootstrapKernelOptions = {}): Pro
     },
     "Kernel bootstrap complete.",
   );
+
+  // Every plugin has now finished its load attempt (loaded or isolated-
+  // failed) — the same "whole pass is done" guarantee `getHttpApp` below
+  // already relies on. Only now is it known whether `database-mysql`
+  // loaded, so only now can the audit sink be safely swapped — see that
+  // function's docs for the full "once database-mysql has loaded, falling
+  // back to in-memory if the DB plugin is disabled" contract.
+  attachPersistentAuditSinkIfAvailable(plugins, auditSink, logger);
 
   const httpApp = getHttpApp(plugins, logger);
 

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createInMemoryAuditSink, type AuditEvent } from "../../src/core/audit.js";
+import {
+  createInMemoryAuditSink,
+  createSwitchableAuditSink,
+  type AuditEvent,
+  type AuditSink,
+} from "../../src/core/audit.js";
 
 function makeEvent(overrides: Partial<AuditEvent> = {}): AuditEvent {
   return {
@@ -130,5 +135,65 @@ describe("createInMemoryAuditSink — record + query basics", () => {
 
     expect(sinkA.all()).toHaveLength(1);
     expect(sinkB.all()).toHaveLength(0);
+  });
+});
+
+describe("createSwitchableAuditSink — feature #29 step 2's delegate-swapping wrapper", () => {
+  it("forwards record() to the initial delegate", () => {
+    const initial = createInMemoryAuditSink();
+    const sink = createSwitchableAuditSink(initial);
+
+    sink.record(makeEvent({ actor: "before-swap" }));
+
+    expect(initial.all()).toEqual([makeEvent({ actor: "before-swap" })]);
+  });
+
+  it("currentDelegate() returns the delegate currently in effect", () => {
+    const initial = createInMemoryAuditSink();
+    const sink = createSwitchableAuditSink(initial);
+    expect(sink.currentDelegate()).toBe(initial);
+
+    const replacement = createInMemoryAuditSink();
+    sink.setDelegate(replacement);
+    expect(sink.currentDelegate()).toBe(replacement);
+  });
+
+  it("setDelegate() redirects every future record() call to the new delegate", () => {
+    const initial = createInMemoryAuditSink();
+    const sink = createSwitchableAuditSink(initial);
+    sink.record(makeEvent({ actor: "before-swap" }));
+
+    const replacement = createInMemoryAuditSink();
+    sink.setDelegate(replacement);
+    sink.record(makeEvent({ actor: "after-swap" }));
+
+    expect(initial.all()).toEqual([makeEvent({ actor: "before-swap" })]);
+    expect(replacement.all()).toEqual([makeEvent({ actor: "after-swap" })]);
+  });
+
+  it("a caller that captured the switchable sink before a swap sees events recorded after the swap land on the new delegate", () => {
+    // Simulates the kernel bootstrap's own shape: the broker/plugins each
+    // capture the *switchable* sink once, long before any swap happens.
+    const initial = createInMemoryAuditSink();
+    const sink = createSwitchableAuditSink(initial);
+    const capturedByBroker: AuditSink = sink;
+
+    const replacement = createInMemoryAuditSink();
+    sink.setDelegate(replacement);
+
+    capturedByBroker.record(makeEvent({ actor: "post-swap-via-captured-reference" }));
+
+    expect(replacement.all()).toHaveLength(1);
+    expect(initial.all()).toHaveLength(0);
+  });
+
+  it("a swap never retroactively moves events already forwarded to the previous delegate", () => {
+    const initial = createInMemoryAuditSink();
+    const sink = createSwitchableAuditSink(initial);
+    sink.record(makeEvent({ actor: "stays-on-initial" }));
+
+    sink.setDelegate(createInMemoryAuditSink());
+
+    expect(initial.all()).toHaveLength(1);
   });
 });
