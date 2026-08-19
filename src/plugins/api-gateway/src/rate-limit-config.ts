@@ -13,16 +13,32 @@
  *     `keyGenerator`) may make within `RATE_LIMIT_WINDOW_MS`, before every
  *     route that doesn't declare its own stricter `rateLimit` override
  *     (see `route-capability.ts`'s `RegisterRouteOptions.rateLimit`).
- *     Defaults to 100, matching `.env.example`.
+ *     Defaults to 300, matching `.env.example`.
  *   - `RATE_LIMIT_WINDOW_MS` — the global sliding time window, in
  *     milliseconds, `RATE_LIMIT_MAX` applies over. Defaults to 60000 (one
  *     minute), matching `.env.example`.
  *
- * Both are safe to load unconditionally at boot (like `CookieConfigSchema`,
- * unlike `SessionConfigSchema`'s required `SESSION_SECRET`) — a deployment
- * with neither var set still boots with sane, documented defaults rather
- * than failing fast, since rate limiting is a defense-in-depth control, not
- * a correctness requirement the way a signed session secret is.
+ * Feature #109 reviewed and tuned these two defaults (originally 100/60000
+ * from feature #66) against realistic traffic assumptions, and is also the
+ * source of truth for the full rationale, operator tuning guidance, and
+ * per-route override examples — see `docs/rate-limiting.md`. In short: 300
+ * requests/minute (~5 req/s sustained) per IP is generous enough to absorb
+ * a single browser tab's normal request fan-out (page load + several XHR/
+ * fetch calls + short-interval polling) and multiple legitimate users
+ * sharing one apparent IP behind NAT/a corporate proxy, while still
+ * bounding the request rate a single source can sustain against the
+ * server; `docs/rate-limiting.md#test-asserting-no-drift-between-the-docs-and-the-configured-defaults`
+ * keeps this comment, `.env.example`, and the doc from silently drifting
+ * apart. Sensitive routes (login, password reset, etc.) are expected to
+ * layer a much stricter `rateLimit` override via `registerRoute()` — the
+ * generous global default is not a substitute for that.
+ *
+ * Both fields are safe to load unconditionally at boot (like
+ * `CookieConfigSchema`, unlike `SessionConfigSchema`'s required
+ * `SESSION_SECRET`) — a deployment with neither var set still boots with
+ * sane, documented defaults rather than failing fast, since rate limiting
+ * is a defense-in-depth control, not a correctness requirement the way a
+ * signed session secret is.
  */
 import { z } from "zod";
 import { loadConfig, type LoadConfigOptions } from "../../../core/config.js";
@@ -32,7 +48,7 @@ export const RateLimitConfigSchema = z.object({
     .number()
     .int("must be an integer")
     .positive("must be a positive number of requests")
-    .default(100),
+    .default(300),
   RATE_LIMIT_WINDOW_MS: z.coerce
     .number()
     .int("must be an integer")
