@@ -1194,7 +1194,7 @@
       "Write integration tests for allowed and denied access at each permission level"
     ],
     "depends_on": [87, 39],
-    "passes": false
+    "passes": true
   },
   {
     "id": 94,
