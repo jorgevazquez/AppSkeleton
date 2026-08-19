@@ -2031,3 +2031,22 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - DELETE returns 200 {id, deleted:true} rather than 204 — this codebase has no existing 204 precedent, and a JSON confirmation body is simpler to assert on/more consistent with every other route's shape here.
 - The GET-by-id route is the only one that renders Markdown to HTML (via render:template, feature #88) — list/create/update responses return raw Markdown content only, to avoid rendering cost on every list-shaped response; a future feature wanting rendered previews in list responses can extend toPageJson's caller without changing the store layer.
 - No plugin in this codebase currently auto-applies its own migrations via db:migrate on boot (confirmed by grepping — rbac has no persistence yet, wiki's tables have only ever been created by hand in each integration test's own beforeAll, same pattern this feature's own new tests follow) — a real gap, but out of scope for #94's own three steps; flagging here for whoever eventually wires migration auto-apply into plugin lifecycle hooks.
+## 2026-08-18 23:35 — Feature #82: Capability index doc generator (which plugin provides/consumes what)
+
+### What was done:
+- Added src/plugins/plugin-builder/src/generate-capability-index.ts: scans all plugin.json manifests under src/plugins via core/registry.ts's scanPluginDirectories + core/manifest.ts's validateManifest, and exposes collectCapabilityIndexEntries()/renderCapabilityIndexDoc()/generateCapabilityIndexDoc() plus a main() CLI entry point (npm run generate:capability-index)
+- Generated docs/capability-index.md: a per-plugin 'provides/requires' table and a per-capability 'provided by/required by' cross-index table, covering all 7 shipped plugins
+- Added docs/capability-index.md to .prettierignore (mirrors the existing plugin-manifest.schema.json exclusion) since lint-staged's prettier --write column-aligns Markdown tables, which would desync the checked-in file from the generator's raw output
+- Added tests/plugins/plugin-builder/capability-index.test.ts: drift test asserting the checked-in doc equals generateCapabilityIndexDoc() output right now (wired into CI via the existing 'npm test' required job — same 'regenerate and diff' pattern as feature #74's manifest schema), plus tests asserting every shipped plugin's id and every declared provides/requires capability appears in the rendered table, correct per-plugin row uniqueness, correct capability-to-provider/consumer attribution, and the '(none)' placeholder for a plugin with no capabilities
+
+### Testing:
+- npx vitest run tests/plugins/plugin-builder/capability-index.test.ts: 5/5 passing
+- npm run lint: clean
+- npm run build (tsc): clean
+- Full suite (npx vitest run): 113/117 files, 1580/1597 tests passing — the 4 failing files (11 tests, database-mysql migrator integration) are pre-existing failures already present in a clean init.sh run before this feature's changes, unrelated to this work
+- Manually regenerated docs/capability-index.md via npm run generate:capability-index and diffed against the checked-in copy
+
+### Notes:
+- Followed the feature #74 (manifest JSON Schema export) precedent exactly: a pure render*() function, a checked-in generated file, and a vitest 'the checked-in file equals renderX() right now' test — that test already runs as part of npm test, which .github/workflows/ci.yml's required job runs, so no separate CI step was needed to satisfy 'wire it to run in CI and fail if stale'
+- Gotcha for future generators: any new generated Markdown/doc file must be added to .prettierignore, or lint-staged's prettier --write will re-align table columns on commit and break the drift test against the generator's raw (unaligned) output — discovered this the hard way after the first commit here
+- depends_on [74, 17, 31, 45, 57] were all already passing; reused core/registry.ts's scanPluginDirectories and core/manifest.ts's validateManifest rather than re-implementing manifest scanning

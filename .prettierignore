@@ -1,3 +1,4 @@
 # Generated artifacts — formatted by their own generator, not prettier, so
 # `npm run generate:*` output and the checked-in file never disagree.
 src/plugins/plugin-builder/schemas/plugin-manifest.schema.json
+docs/capability-index.md
