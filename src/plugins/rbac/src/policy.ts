@@ -37,21 +37,41 @@
  *    another role never "conflict" — either alone is sufficient to allow
  *    access, so the two are evaluated as one flat set of candidate grants
  *    with no ordering between them that could change the outcome.
+ * 5. **Role hierarchy is additive and transitive, just like multi-role
+ *    membership itself (rule 2).** If a user's role inherits from a parent
+ *    role (feature #43, `hierarchy.ts`'s {@link RoleHierarchy} edges), the
+ *    user is treated as if they also directly held every ancestor role —
+ *    not just the immediate parent, but that parent's own parents, and so
+ *    on. Inheriting from a parent never *narrows* what a role's own direct
+ *    grants (or its other parents') already allow; it can only add more.
+ *    Resolution walks {@link PolicyStore.roleParents} via `hierarchy.ts`'s
+ *    {@link resolveAncestorRoleIds}, which is cycle-safe by construction —
+ *    see that module's docs for why `can()` itself never needs its own
+ *    cycle guard.
  */
+import { resolveAncestorRoleIds } from "./hierarchy.js";
 import type { PermissionString } from "./permission.js";
-import type { RolePermission, UserRole } from "./types.js";
+import type { RoleHierarchy, RolePermission, UserRole } from "./types.js";
 
 /**
  * The explicit, in-memory data `can()` reads to resolve a user's roles to
- * permissions. Both arrays mirror {@link UserRole}/{@link RolePermission}
- * (feature #32) — a future DB-backed caller (feature #34) constructs one
- * of these per check (or per request) from `db:query` results.
+ * permissions. `userRoles`/`rolePermissions` mirror {@link UserRole}/
+ * {@link RolePermission} (feature #32) — a future DB-backed caller (feature
+ * #34) constructs one of these per check (or per request) from `db:query`
+ * results. `roleParents` (feature #43) is optional and defaults to "no
+ * hierarchy" (treated as `[]`) so every pre-existing caller that only ever
+ * built `{ userRoles, rolePermissions }` literals keeps working unchanged.
  */
 export interface PolicyStore {
   /** Every user→role assignment currently in effect. */
   readonly userRoles: readonly UserRole[];
   /** Every role→permission grant currently in effect. */
   readonly rolePermissions: readonly RolePermission[];
+  /**
+   * Every role→parent-role inheritance edge currently in effect (feature
+   * #43). Omitted or empty means no role inherits from any other.
+   */
+  readonly roleParents?: readonly RoleHierarchy[];
 }
 
 /**
@@ -88,21 +108,27 @@ export function matchesPermission(
 }
 
 /**
- * Resolve `userId`'s roles to their union of granted permissions (per the
- * precedence rules documented at the top of this file) and check whether
- * `action` on `resource` is allowed. Deny-by-default: returns `false`
- * unless at least one of the user's roles holds a matching exact or
- * wildcard grant.
+ * Resolve `userId`'s roles — plus, transitively, every role those roles
+ * inherit from (feature #43, precedence rule 5) — to their union of
+ * granted permissions, and check whether `action` on `resource` is
+ * allowed. Deny-by-default: returns `false` unless at least one directly
+ * held or inherited role holds a matching exact or wildcard grant.
  */
 export function can(store: PolicyStore, userId: string, action: string, resource: string): boolean {
-  const roleIds = new Set(
-    store.userRoles
-      .filter((userRole) => userRole.userId === userId)
-      .map((userRole) => userRole.roleId),
-  );
+  const directRoleIds = store.userRoles
+    .filter((userRole) => userRole.userId === userId)
+    .map((userRole) => userRole.roleId);
 
-  if (roleIds.size === 0) {
+  if (directRoleIds.length === 0) {
     return false;
+  }
+
+  const roleParents = store.roleParents ?? [];
+  const roleIds = new Set(directRoleIds);
+  for (const roleId of directRoleIds) {
+    for (const ancestorRoleId of resolveAncestorRoleIds(roleParents, roleId)) {
+      roleIds.add(ancestorRoleId);
+    }
   }
 
   return store.rolePermissions.some(

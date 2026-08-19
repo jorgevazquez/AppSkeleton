@@ -85,3 +85,30 @@ export interface UserRole {
   /** {@link Role.id} of the assigned role. */
   readonly roleId: string;
 }
+
+/**
+ * Association table: role hierarchy / inheritance (feature #43). Records
+ * that {@link roleId} inherits every permission {@link parentRoleId} holds
+ * — directly-granted (via {@link RolePermission}) or, transitively, itself
+ * inherited from a further-up ancestor. Mirrors the future
+ * `rbac_role_hierarchy` table — `(roleId, parentRoleId)` is the composite
+ * primary key; a given pair should appear at most once in any store.
+ *
+ * A role may have more than one parent (multiple `RoleHierarchy` rows with
+ * the same `roleId`, different `parentRoleId`s) — inheritance is additive,
+ * exactly like a user holding multiple roles (see `policy.ts`'s `can()`
+ * precedence rule 2): a role never loses a permission because it also
+ * inherits from a parent that stays silent on it.
+ *
+ * Only ever construct/extend a `RoleHierarchy[]` collection through
+ * `hierarchy.ts`'s {@link addRoleParent} (not a bare `.push(...)`) outside
+ * of hand-seeded test/fixture data — see that module for why a naive push
+ * can silently introduce a cyclic hierarchy that `can()`'s ancestor
+ * resolution would otherwise have to defend against on every single call.
+ */
+export interface RoleHierarchy {
+  /** {@link Role.id} of the role that inherits from {@link parentRoleId}. */
+  readonly roleId: string;
+  /** {@link Role.id} of the parent role being inherited from. */
+  readonly parentRoleId: string;
+}
