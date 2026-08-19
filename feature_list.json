@@ -1130,7 +1130,7 @@
       "Write a test rendering a page containing an XSS-style payload in Markdown and asserting it is neutralized"
     ],
     "depends_on": [87, 52],
-    "passes": false
+    "passes": true
   },
   {
     "id": 89,
