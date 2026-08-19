@@ -20,6 +20,8 @@
     "migrate": "tsx src/plugins/database-mysql/src/migrate.ts up",
     "migrate:down": "tsx src/plugins/database-mysql/src/migrate.ts down",
     "seed": "tsx src/cli/seed.ts",
+    "backup": "scripts/backup.sh",
+    "restore": "scripts/restore.sh",
     "create-plugin": "tsx src/plugins/plugin-builder/src/cli.ts create",
     "introspect": "tsx src/cli/introspect.ts",
     "generate:manifest-schema": "tsx src/plugins/plugin-builder/src/generate-manifest-json-schema.ts",
