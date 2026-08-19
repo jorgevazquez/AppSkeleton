@@ -1453,3 +1453,24 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Deliberately did not add an npm-level override/allowlist mechanism (e.g. package.json's audit config) since there is currently nothing to allowlist — the repo has 0 known vulnerabilities. docs/security.md describes that path as a last-resort, explicitly-justified option for a future flagged finding, not something to pre-wire now.
 - Chose audit-level=high (not critical) per the feature's own step 1 wording; moderate/low findings still print in CI logs (npm audit's default verbosity) but do not fail the job, which matches the intent of gating only on high/critical per docs/security.md section 1.
 - The scratch-branch test used lodash@4.17.15 pinned as an exact version (not a caret range) specifically so npm install would resolve to that vulnerable version rather than silently picking up the already-patched latest 4.x; this is a deliberate, temporary, and fully-reverted local-only change and never appears in any commit.
+
+---
+
+## 2026-08-18 17:12 — Feature #71: Request size limits and timeout configuration
+
+### What was done:
+- Added src/plugins/api-gateway/src/request-limits-config.ts: a Zod-validated REQUEST_BODY_LIMIT_BYTES (default 1048576, matching Fastify's own default) / REQUEST_TIMEOUT_MS (default 30000ms, deliberately overriding Fastify's own disabled-by-default 0) config, loaded via the kernel's shared loadConfig() layered engine (defaults -> env -> override file), mirroring rate-limit-config.ts/security-headers-config.ts.
+- Wired loadRequestLimitsConfig() into api-gateway/index.ts's buildApp(), passed straight through as Fastify's own bodyLimit/requestTimeout constructor options — these must be set before Fastify(...) is constructed (unlike every other register*Config() call in buildApp, which apply to an already-built instance).
+- Re-exported RequestLimitsConfigSchema/loadRequestLimitsConfig/RequestLimitsConfig from api-gateway's index.ts, matching the plugin's existing re-export convention for every other src/ config module.
+- Added REQUEST_BODY_LIMIT_BYTES=1048576 and REQUEST_TIMEOUT_MS=30000 to .env.example under the api-gateway plugin section.
+
+### Testing:
+- New tests/plugins/api-gateway/request-limits-config.test.ts (10 tests): defaults, env overrides, coercion, and ConfigError on malformed/zero/negative values for both fields.
+- New tests/plugins/api-gateway/request-limits.test.ts (6 tests): asserts REQUEST_BODY_LIMIT_BYTES/REQUEST_TIMEOUT_MS actually reach the constructed Fastify instance (app.initialConfig.bodyLimit, app.server.requestTimeout — the latter asserted off the underlying Node http.Server since Fastify's own initialConfig TS typings omit requestTimeout despite tracking it at runtime), plus the feature's explicit step-2 requirement: a POST with a body larger than REQUEST_BODY_LIMIT_BYTES gets a 413 with the uniform error envelope and the route handler (a vi.fn() spy) is never invoked; a same-size-or-under body reaches the handler normally.
+- Ran the full suite: npx vitest run -> 74/83 test files passed (9 pre-existing intentional skips), 1206/1206 non-skipped tests passing (14 new, 0 regressions). npm run lint (eslint) clean. npm run build (tsc) clean — had to fix one build-only issue: app.initialConfig.requestTimeout isn't in Fastify's own .d.ts (a typing gap, not a runtime one), so the test asserts app.server.requestTimeout instead. npx prettier --check clean on all changed .ts files.
+
+### Notes:
+- REQUEST_TIMEOUT_MS defaults to 30000ms rather than Fastify's own upstream default of 0 (disabled) — deliberate 'secure by default' choice matching this plugin's existing posture (CORS_ORIGIN empty-deny-by-default, HELMET_ENABLED true by default): an unconfigured deployment shouldn't be trivially exposed to a slow-request/slowloris-style resource exhaustion attack.
+- REQUEST_BODY_LIMIT_BYTES defaults to 1048576 (1 MiB) matching Fastify's own built-in default exactly, so an unconfigured deployment's body-size behavior is unchanged from before this feature.
+- Body-size rejection needs no new error-handling code: error-handler.ts's existing toGenericClientErrorEnvelope() already wraps any FastifyError carrying a 4xx statusCode (Fastify's FST_ERR_CTP_BODY_TOO_LARGE included) in the uniform {code, message} envelope, so a 413 from an oversized payload was already correctly shaped once bodyLimit was wired in — feature #60/#61's error handler needed zero changes.
+- bodyLimit/requestTimeout are Fastify constructor options, not something a register*() call (like registerRateLimiting/registerCors) can apply after Fastify(...) already exists — loadRequestLimitsConfig() is called and used before the Fastify({...}) call in buildApp(), unlike every other config load in that function which happens after.
