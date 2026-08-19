@@ -1844,3 +1844,23 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Duplicate-slug and namespace-existence are both enforced with a pre-insert SELECT (ValidationError), mirroring rbac/src/manage.ts's assertRoleNameAvailable precedent, rather than parsing the DB's raw ER_DUP_ENTRY — the wiki_pages_namespace_slug_uniq unique index (feature #86) still backstops the race window.
 - No src/plugins/wiki/index.ts was added — docs/plugin-conventions.md explicitly allows index.ts to stay unbuilt until a plugin has real lifecycle logic, and feature #94 (Wiki HTTP routes via api-gateway) is the feature that will actually wire onEnable/routes; feature #87 is data-layer only.
 - If a full npm test run after several ad-hoc manual runs shows extra database-mysql migrator failures, it's leftover schema_migrations bookkeeping from prior runs in this same docker-compose MySQL container, not a real regression — a clean DB (DROP TABLE schema_migrations, schema_seeds, database_mysql_audit_log) makes it reproduce down to just the one pre-existing env-dependent failure above.
+## 2026-08-18 18:41 — Feature #28: Backup and restore helper scripts
+
+### What was done:
+- Added scripts/backup.sh (mysqldump-based) and scripts/restore.sh (mysql client), plus a shared scripts/lib/env.sh helper for .env loading (dotenv-compatible: real env vars always win over .env) and required-var validation. Wired up as npm run backup / npm run restore in package.json.
+- backup.sh: mysqldump --single-transaction --routines --triggers --events --set-gtid-purged=OFF, gzip-compressed, defaults to ./backups/<DB_NAME>-<UTC timestamp>.sql.gz or an explicit output path. Password passed via MYSQL_PWD (never on the command line). ./backups/ added to .gitignore.
+- restore.sh: accepts plain .sql or gzip (detected by magic bytes, not extension), pipes into mysql <DB_NAME>. Destructive (mysqldump's default --add-drop-table means every table in the backup is dropped+recreated) so it prompts for confirmation unless --force or DB_RESTORE_SKIP_CONFIRM=true is set; refuses to run non-interactively without one of those.
+- Documented full usage, config precedence, and the destructive-restore behavior in docs/backup-restore.md.
+- Added tests/core/backup-restore.integration.test.ts: seeds a 3-row fixture table, runs backup.sh, mutates the table, runs restore.sh --force, asserts row-for-row equality with the original seed. Follows the repo's describe.runIf(mysqlReachable) skip-when-no-Docker convention.
+
+### Testing:
+- Manual smoke test first (mysql client CLI): seeded a table, backed up, mutated, restored, verified data matched exactly.
+- npx vitest run tests/core/backup-restore.integration.test.ts — passes standalone and within the full npm test run.
+- npm run lint (clean), npm run build / tsc (clean), npm run format:check on all touched files (clean — no prettier warnings on any file this feature added or modified).
+- Ran the full suite (npm test): pre-existing failures in tests/core/audit-persistence.integration.test.ts, tests/plugins/database-mysql/{integration,migrator.integration}.test.ts, and tests/plugins/wiki/migrations.integration.test.ts reproduce even on a freshly reset DB + fresh 'npm run migrate', confirmed unrelated to this feature (none of the failing tests reference backup/restore) and already documented as a known shared-global-schema_migrations-table race in claude-progress.txt (see feature #19/#27/#86 notes) that surfaces when testing against a real/persistent MySQL instead of a disposable CI container.
+
+### Notes:
+- No Docker daemon available in this sandbox; used Homebrew's local mysqld/mysql.server (MySQL 9.7) with matching docker-compose.yml credentials (appskeleton/change-me/appskeleton) as a stand-in so the integration test could run for real rather than self-skip.
+- Chose plain bash scripts (not a TS CLI like migrate.ts/seed.ts) since the feature explicitly asks for a 'mysqldump-based' script — shelling out directly to mysqldump/mysql keeps it usable outside the Node toolchain entirely (cron, ops runbooks) with zero npm dependencies.
+- scripts/lib/env.sh's .env parser avoids bash 4+-only negative-index substring expansion (${value:1:-1}) since macOS ships bash 3.2 by default; used front/back parameter-expansion trims instead for portability.
+- Flagging for whoever eventually tackles the pre-existing shared-schema_migrations-table race (already flagged by feature #19/#34/#86's notes): it's still there and still not this feature's job to fix, but it does mean a local (non-Docker) full-suite run will show several unrelated red integration tests that are not signal for anything backup/restore related.
