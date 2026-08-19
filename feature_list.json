@@ -926,7 +926,7 @@
       "Run npm test and confirm all pass"
     ],
     "depends_on": [60, 61, 64, 65, 66],
-    "passes": false
+    "passes": true
   },
   {
     "id": 73,
