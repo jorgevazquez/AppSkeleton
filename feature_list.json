@@ -965,7 +965,7 @@
       "Write a test that generates a plugin into a temp dir and validates every emitted file"
     ],
     "depends_on": [74],
-    "passes": false
+    "passes": true
   },
   {
     "id": 76,
