@@ -99,6 +99,28 @@
  * lint; a false positive is a linter that cries wolf on legitimate code),
  * the same tradeoff `manifest-json-schema.ts` documents for `depends_on`
  * semver *ranges*.
+ *
+ * ## Check 4: capability cross-check (feature #81)
+ *
+ * Checks 1–3 above look at one plugin directory in isolation. This fourth
+ * check is the one exception: it can only be evaluated across the *whole*
+ * set of plugins being linted together, so it only ever runs from
+ * {@link lintAllPlugins} (a bare {@link lintPlugin} call has no sibling
+ * plugins to compare against, and deliberately does not attempt this check).
+ *
+ * For every capability id in a plugin's `capabilities.requires`, this checks
+ * whether *any* plugin among the ones just linted declares that same id in
+ * its own `capabilities.provides`. If none do, that requirement can never
+ * actually be satisfied by `capabilities.obtain()` against the plugin set as
+ * it currently stands, and an `unsatisfied_capability_requirement` issue is
+ * reported. Unlike checks 1–3, this is reported with `severity: "warning"`,
+ * not left as an implicit hard error: `docs/plugin-conventions.md`'s own
+ * description of `capabilities.requires` calls it "a ceiling, not a
+ * guarantee — obtaining still requires an operator grant and a live
+ * provider," so a plugin whose provider simply hasn't been written/loaded
+ * *yet* (mid-development, or intentionally supplied by a plugin outside this
+ * particular scan) is not necessarily broken — it is flagged so the drift is
+ * visible, not blocked outright.
  */
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -119,7 +141,20 @@ export type ConventionsLintIssueCode =
   | "id_directory_mismatch"
   | "undeclared_capability_use"
   | "undeclared_capability_provide"
-  | "forbidden_import";
+  | "forbidden_import"
+  | "unsatisfied_capability_requirement";
+
+/**
+ * How serious a violation is. Omitted (`undefined`) means the historical
+ * default of every check this linter shipped before feature #81 — a hard
+ * convention violation. `"warning"` is used only by the capability
+ * cross-check (`unsatisfied_capability_requirement`, see this module's
+ * docs), which flags something that is not necessarily wrong (a capability
+ * requirement whose provider hasn't been written/loaded yet is "a ceiling,
+ * not a guarantee" per `docs/plugin-conventions.md`) rather than a definite
+ * defect in the plugin being linted.
+ */
+export type ConventionsLintIssueSeverity = "error" | "warning";
 
 /** One violation found in a plugin directory. */
 export interface ConventionsLintIssue {
@@ -129,6 +164,8 @@ export interface ConventionsLintIssue {
   readonly message: string;
   /** Path (relative to the plugin's own directory) of the file the issue was found in, when file-specific. */
   readonly file?: string;
+  /** Defaults to `"error"` when omitted — see {@link ConventionsLintIssueSeverity}. */
+  readonly severity?: ConventionsLintIssueSeverity;
 }
 
 /** The result of linting a single plugin directory. */
@@ -198,7 +235,104 @@ export async function lintAllPlugins(pluginsRoot: string): Promise<ConventionsLi
   for (const pluginName of pluginNames) {
     results.push(await lintPlugin(resolvedPluginsRoot, pluginName));
   }
-  return results;
+  return addCapabilityCrossCheckIssues(resolvedPluginsRoot, pluginNames, results);
+}
+
+// ---------------------------------------------------------------------------
+// Check 4: capability cross-check (feature #81) — the one check that spans
+// every plugin in the set, so it lives here (driven by lintAllPlugins)
+// rather than inside lintPlugin/lintNaming above.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse and validate `<directoryPath>/plugin.json`, returning `undefined` on
+ * any failure (missing file, malformed JSON, schema-invalid) instead of
+ * throwing or recording an issue. Deliberately silent: a plugin with a
+ * broken manifest already gets `missing_manifest`/`malformed_manifest`/
+ * `invalid_manifest` from {@link lintNaming}'s own pass over the same
+ * directory — this helper exists purely so the capability cross-check can
+ * *skip* such a plugin's `requires`/`provides` without double-reporting the
+ * manifest problem itself.
+ */
+async function loadManifestQuietly(directoryPath: string): Promise<PluginManifest | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(path.join(directoryPath, MANIFEST_FILENAME), "utf-8");
+  } catch {
+    return undefined;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+
+  const validated = validateManifest(parsed);
+  return isOk(validated) ? validated.value : undefined;
+}
+
+/**
+ * Given every plugin just linted (`pluginNames`, under `pluginsRoot`), add
+ * an `unsatisfied_capability_requirement` (severity `"warning"`) issue to
+ * any plugin whose `capabilities.requires` names a capability id that no
+ * plugin in this same set — including itself — declares under
+ * `capabilities.provides`. See this module's docs ("Check 4") for why this
+ * only runs here, across the whole set, rather than inside {@link lintPlugin}.
+ *
+ * `results` is not mutated — {@link ConventionsLintResult} and its `issues`
+ * are both `readonly`, by design (every other check builds up `issues`
+ * before a result is ever constructed); this returns a new array, replacing
+ * only the entries that gain a cross-check issue.
+ */
+async function addCapabilityCrossCheckIssues(
+  pluginsRoot: string,
+  pluginNames: string[],
+  results: readonly ConventionsLintResult[],
+): Promise<ConventionsLintResult[]> {
+  const manifestsByPluginName = new Map<string, PluginManifest>();
+  for (const pluginName of pluginNames) {
+    const manifest = await loadManifestQuietly(path.join(pluginsRoot, pluginName));
+    if (manifest) {
+      manifestsByPluginName.set(pluginName, manifest);
+    }
+  }
+
+  const providedCapabilityIds = new Set<string>();
+  for (const manifest of manifestsByPluginName.values()) {
+    for (const capabilityId of manifest.capabilities.provides) {
+      providedCapabilityIds.add(capabilityId);
+    }
+  }
+
+  return results.map((result) => {
+    const manifest = manifestsByPluginName.get(result.pluginName);
+    if (!manifest) {
+      // Manifest didn't parse/validate — lintNaming already reported why;
+      // there is nothing meaningful to cross-check `requires` against.
+      return result;
+    }
+
+    const crossCheckIssues: ConventionsLintIssue[] = [];
+    for (const capabilityId of manifest.capabilities.requires) {
+      if (!providedCapabilityIds.has(capabilityId)) {
+        crossCheckIssues.push({
+          code: "unsatisfied_capability_requirement",
+          severity: "warning",
+          message:
+            `capability "${capabilityId}" is listed in this plugin's capabilities.requires, but no ` +
+            `plugin loaded from "${pluginsRoot}" declares it in capabilities.provides — it cannot ` +
+            `currently be obtained from the broker.`,
+        });
+      }
+    }
+
+    if (crossCheckIssues.length === 0) {
+      return result;
+    }
+    return { ...result, issues: [...result.issues, ...crossCheckIssues] };
+  });
 }
 
 // ---------------------------------------------------------------------------
