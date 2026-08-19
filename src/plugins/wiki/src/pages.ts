@@ -72,6 +72,8 @@ import type { CreatePageInput, Page, UpdatePageInput } from "./types.js";
 /** Table names — the `wiki_` namespace this plugin's migrations create (feature #22's per-plugin convention). */
 export const PAGES_TABLE = "wiki_pages";
 export const NAMESPACES_TABLE = "wiki_namespaces";
+/** See `revisions.ts` — re-exported/consumed from here too since {@link WikiPagesStore.updatePage} is the only writer. */
+export const REVISIONS_TABLE = "wiki_revisions";
 
 /**
  * Structural shape of the `db:query` capability this module needs — see
@@ -150,6 +152,17 @@ export interface WikiPagesStore {
    * {@link NotFoundError} (feature #87 step 3) if `id` does not reference an
    * existing page. Omitted fields are left unchanged; returns the updated
    * page.
+   *
+   * Feature #89 step 1 ("On every page update, snapshot the previous
+   * content into wiki_revisions before applying the change"): when
+   * `changes` actually changes something, the page's pre-update
+   * `title`/`content` is inserted as a new `wiki_revisions` row in the same
+   * database transaction as the update itself, so a revision row and its
+   * corresponding page mutation are never observed independently — either
+   * both land or (on any failure) neither does. A call with an empty
+   * `changes` (every field omitted) writes no revision, since nothing was
+   * actually superseded. See `revisions.ts`'s `listRevisions` for reading
+   * these back in reverse-chronological order.
    */
   updatePage(id: number, changes: UpdatePageInput): Promise<Page>;
   /** Delete an existing page. Throws a {@link NotFoundError} (feature #87 step 3) if `id` does not reference an existing page. */
@@ -258,7 +271,7 @@ export function createWikiPagesStore(dbQuery: WikiDbQueryCapability): WikiPagesS
     listPages,
 
     async updatePage(id, changes) {
-      await requirePage(id);
+      const before = await requirePage(id);
 
       const updates: Record<string, unknown> = {};
       if (changes.title !== undefined) {
@@ -269,8 +282,27 @@ export function createWikiPagesStore(dbQuery: WikiDbQueryCapability): WikiPagesS
       }
 
       if (Object.keys(updates).length > 0) {
+        // Feature #89 step 1: snapshot `before`'s title/content into
+        // wiki_revisions and apply the update in the same transaction, so
+        // the two writes are atomic — a failure partway through leaves
+        // neither the revision row nor the update visible (Kysely rolls
+        // the whole `fn` back on rejection; see
+        // `transaction-capability.ts`'s doc comment for the same
+        // commit/rollback contract this plugin's own `db:query`-obtained
+        // `Kysely<Database>` handle gives for free via `.transaction()`).
         await dbQuery.query((db) =>
-          db.updateTable(PAGES_TABLE).set(updates).where("id", "=", id).execute(),
+          db.transaction().execute(async (trx) => {
+            await trx
+              .insertInto(REVISIONS_TABLE)
+              .values({
+                page_id: id,
+                title: before.title,
+                content: before.content,
+              })
+              .execute();
+
+            await trx.updateTable(PAGES_TABLE).set(updates).where("id", "=", id).execute();
+          }),
         );
       }
 

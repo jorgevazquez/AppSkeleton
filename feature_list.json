@@ -1143,7 +1143,7 @@
       "Write a test asserting 3 sequential edits produce 3 retrievable revisions in the correct order"
     ],
     "depends_on": [86, 87],
-    "passes": false
+    "passes": true
   },
   {
     "id": 90,
