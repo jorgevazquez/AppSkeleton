@@ -4,7 +4,7 @@
   "depends_on": {},
   "capabilities": {
     "provides": ["http:route"],
-    "requires": ["rbac:check", "render:template"]
+    "requires": ["rbac:check", "render:template", "html:error-pages"]
   },
   "entry_point": "index.ts"
 }

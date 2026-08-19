@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "depends_on": {},
   "capabilities": {
-    "provides": ["render:template"],
+    "provides": ["render:template", "html:error-pages"],
     "requires": []
   },
   "entry_point": "index.ts"

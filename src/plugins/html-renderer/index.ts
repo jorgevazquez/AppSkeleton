@@ -53,6 +53,12 @@
 import type { ValidationError } from "../../core/errors.js";
 import { ok, type Result } from "../../core/types.js";
 import {
+  renderNotFoundPage,
+  renderServerErrorPage,
+  type NotFoundPageContext,
+  type ServerErrorPageOptions,
+} from "./src/error-pages.js";
+import {
   compileTemplate,
   type CompileOptions,
   type CompiledTemplate,
@@ -64,6 +70,12 @@ import {
 // calls from this one module, the same way api-gateway re-exports its own
 // route-capability types from `index.ts`.
 export type { CompileOptions, CompiledTemplate, TemplateContext } from "./src/template.js";
+
+// Re-exported so a consuming plugin can type-only import everything it needs
+// for `capabilities.obtain<ErrorPagesCapability>("html:error-pages")` calls
+// from this one module — feature #116, see `./src/error-pages.js` (feature
+// #55) for the full render contract these two functions defer to entirely.
+export type { NotFoundPageContext, ServerErrorPageOptions } from "./src/error-pages.js";
 
 /**
  * What `render:template` hands back to a consuming plugin.
@@ -108,13 +120,31 @@ function render(
 }
 
 /**
+ * What `html:error-pages` hands back to a consuming plugin (feature #116 —
+ * "End-to-end wired 404/500 error pages through html-renderer and
+ * api-gateway"). Thin pass-through to `./src/error-pages.js`'s two render
+ * functions (feature #55) — no state, no per-instance construction, for the
+ * same reason `render:template` above needs none.
+ */
+export interface ErrorPagesCapability {
+  /** Render the default 404 page. See `error-pages.ts`'s `renderNotFoundPage` docs. */
+  renderNotFoundPage(context?: NotFoundPageContext): string;
+  /** Render the default 500 page. See `error-pages.ts`'s `renderServerErrorPage` docs — in particular, no stack-trace leak outside `nodeEnv: "development"`. */
+  renderServerErrorPage(options: ServerErrorPageOptions): string;
+}
+
+/**
  * Registered with the broker before this module's lifecycle hooks would run
- * (see `loader.ts`'s declare-before-hooks ordering). `render:template` needs
- * no per-instance construction — `compile()`/`render()` are stable closures
- * over `compileTemplate` from the moment this module is imported, so, like
- * rbac's `rbac:check`, this plugin currently exports no lifecycle hooks at
- * all.
+ * (see `loader.ts`'s declare-before-hooks ordering). Both `render:template`
+ * and `html:error-pages` need no per-instance construction — every function
+ * either exposes is a stable closure over a pure function from the moment
+ * this module is imported, so, like rbac's `rbac:check`, this plugin
+ * currently exports no lifecycle hooks at all.
  */
 export const provides: Readonly<Record<string, unknown>> = {
   "render:template": { compile, render } satisfies RenderTemplateCapability,
+  "html:error-pages": {
+    renderNotFoundPage,
+    renderServerErrorPage,
+  } satisfies ErrorPagesCapability,
 };

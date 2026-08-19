@@ -35,17 +35,21 @@ describe("html-renderer plugin manifest", () => {
     }
   });
 
-  it("declares render:template as its sole provided capability", async () => {
+  it("declares render:template and html:error-pages as its provided capabilities", async () => {
     const { entries } = await scanPluginDirectories(PLUGINS_ROOT);
     const entry = entries.find((candidate) => candidate.name === "html-renderer");
     const result = validateManifest(entry?.manifest);
 
     expect(isOk(result)).toBe(true);
     if (isOk(result)) {
+      // html:error-pages (feature #116) joined render:template here once
+      // `./index.ts` started exposing `./src/error-pages.ts`'s
+      // renderNotFoundPage/renderServerErrorPage (feature #55) as a second
+      // capability, for api-gateway's error handler to consume.
       expect(result.value.capabilities.provides).toEqual(
-        expect.arrayContaining(["render:template"]),
+        expect.arrayContaining(["render:template", "html:error-pages"]),
       );
-      expect(result.value.capabilities.provides).toHaveLength(1);
+      expect(result.value.capabilities.provides).toHaveLength(2);
       expect(result.value.capabilities.requires).toHaveLength(0);
     }
   });

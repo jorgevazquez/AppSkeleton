@@ -1489,7 +1489,7 @@
       "Write a test asserting an unknown route returns the styled 404 page for a browser-like request and a JSON envelope for an API request"
     ],
     "depends_on": [55, 61],
-    "passes": false
+    "passes": true
   },
   {
     "id": 117,

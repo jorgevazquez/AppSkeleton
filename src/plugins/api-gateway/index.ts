@@ -311,8 +311,13 @@ export async function buildApp(
   // {code, message, details} envelope covers /health, every route a
   // consumer registers via registerRoute() (feature #59), Fastify's own
   // schema-validation failures, and unmatched routes alike — see
-  // ./src/error-handler.ts's module docs.
-  registerErrorHandling(built);
+  // ./src/error-handler.ts's module docs. `context.capabilities` is threaded
+  // through (feature #116) so a browser-like request (Accept: text/html)
+  // can get the styled 404/500 page from html-renderer's `html:error-pages`
+  // capability instead of the JSON envelope — obtained lazily, per request,
+  // inside the handler itself, the same load-order-safe pattern
+  // registerRbacProtection below uses for rbac:check.
+  registerErrorHandling(built, { capabilities: context.capabilities });
 
   // Wired — and *awaited* — before any route is registered (feature #66)
   // so every route, /health included, plus every route a consumer plugin
