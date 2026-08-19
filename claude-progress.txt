@@ -1684,3 +1684,21 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Did not touch feature #71's REQUEST_BODY_LIMIT_BYTES/REQUEST_TIMEOUT_MS (request-limits-config.ts) -- feature #109 depends_on only [66], and those two settings already have their own documented, deliberately-secure-by-default rationale in that module's own doc comment. docs/rate-limiting.md references them as a complementary DoS-mitigation layer (section 1) for context but the no-drift test only covers the RATE_LIMIT_* pair this feature actually owns.
 - No plugin route in src/ currently sets a per-route rateLimit override (only tests do) -- docs/rate-limiting.md's login-route example is illustrative/forward-looking guidance for future route authors (e.g. whenever an actual auth plugin lands), not documentation of an existing override.
 - Flagged a real, pre-existing gap for future agents: this codebase does not set Fastify's trustProxy option, so if deployed behind a reverse proxy/load balancer, @fastify/rate-limit's default IP-keyed limiter collapses all traffic into one bucket (every request appears to come from the proxy's address). This is called out explicitly in docs/rate-limiting.md's operator tuning guidance section as something to fix (configure trustProxy, or rate-limit at the proxy layer) before relying on this feature in that topology -- intentionally left as a documented caveat rather than an in-scope code fix, since feature #109's steps are about defaults/tuning/docs/drift-test, not about adding trustProxy support (a separate, undertaken-elsewhere concern).
+
+---
+
+## 2026-08-18 17:59 — Feature #115: Contribution guide and coding standards
+
+### What was done:
+- Wrote CONTRIBUTING.md covering branch conventions (feature-<id> branches, worktree isolation), commit conventions (feat:/docs:/merge: patterns derived from actual git log), the full infinite-dev feature workflow (orient -> implement -> test -> record & commit -> next/skip), lint/test requirements (npm run lint/build/test/format:check plus what CI additionally gates: npm audit, gitleaks, Docker-gated integration tests), and PR expectations (scope, clean git status, green checks, paired feat:/docs: commits, no feature_list.json step edits, feature id traceability).
+- Cross-linked it from README.md with a new 'Contributing' section pointing at CONTRIBUTING.md.
+
+### Testing:
+- npm run lint: clean. npm run build (tsc): clean. npm test: 1346 passed / 51 skipped (1397 total), matching the pre-change baseline -- zero regressions.
+- npx prettier --check CONTRIBUTING.md README.md: clean (iterated once to fix an awkward mid-inline-code line wrap prettier introduced on first --write).
+- Verified npm run format:check's 8 pre-existing warnings (AGENTS.md, spec.md, various tests, etc.) are unrelated pre-existing drift, not something this change touched or introduced -- confirmed neither CONTRIBUTING.md nor README.md appear in that list.
+
+### Notes:
+- Sourced every convention from the repo's actual observed behavior rather than inventing rules: commit message shapes came from 'git log --oneline' (feat:/docs:/merge: patterns), branch naming from 'git worktree list' plus dev-agent.py's merge_feature_branch/branch = f"feature-{feature_id}" logic, and CI gates from .github/workflows/ci.yml (lint, build, test, npm audit, gitleaks, MySQL-service-backed integration tests).
+- Did not touch AGENTS.md (the canonical workflow description) -- CONTRIBUTING.md summarizes and links to it rather than duplicating it, so the two can't drift silently out of the same way docs/plugin-conventions.md links back to manifest.ts as source of truth.
+- Left the 8 pre-existing prettier format:check warnings (AGENTS.md, spec.md, several test files) untouched -- they predate this feature and aren't in scope for a contribution-guide feature; flagging here in case a future 'consistent formatting' feature wants to sweep them.
