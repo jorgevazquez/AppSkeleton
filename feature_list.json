@@ -361,7 +361,7 @@
       "Write a test (can be a shell-invoking integration test) that backs up and restores a small dataset and asserts row-for-row equality"
     ],
     "depends_on": [19],
-    "passes": false
+    "passes": true
   },
   {
     "id": 29,
