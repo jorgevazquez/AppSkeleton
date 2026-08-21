@@ -1272,7 +1272,7 @@
       "Write a test asserting seeding twice does not duplicate the Home page"
     ],
     "depends_on": [87],
-    "passes": false
+    "passes": true
   },
   {
     "id": 100,
