@@ -467,6 +467,70 @@ describe.runIf(mysqlReachable)("wiki HTTP routes — end-to-end over real HTTP (
     await apiGatewayModule.onDisable();
   });
 
+  it("get: a stale cached render is never served after an edit (feature #101)", async () => {
+    const app = await loadServer();
+    const { sidCookie } = await loginAs(app, "editor");
+    const { cookie, token } = await obtainCsrf(app, sidCookie);
+
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/v1/wiki/pages",
+      headers: { cookie, "x-csrf-token": token },
+      payload: {
+        namespaceId: NAMESPACE_ID,
+        slug: "cache-invalidation-page",
+        title: "Cache Invalidation Page",
+        content: "# Original heading",
+      },
+    });
+    expect(create.statusCode).toBe(201);
+    const pageId = (create.json() as { id: number }).id;
+
+    // First GET renders (and, per feature #101 step 1, caches) the original content.
+    const firstGet = await app.inject({
+      method: "GET",
+      url: `/api/v1/wiki/pages/${pageId}`,
+      headers: { cookie: sidCookie },
+    });
+    expect(firstGet.statusCode).toBe(200);
+    expect((firstGet.json() as { contentHtml: string }).contentHtml).toContain(
+      "<h1>Original heading</h1>",
+    );
+
+    // A second GET before any edit still returns the same (correct) content — proving the
+    // cache-hit path itself renders identically to a cache miss, not just "some string".
+    const secondGet = await app.inject({
+      method: "GET",
+      url: `/api/v1/wiki/pages/${pageId}`,
+      headers: { cookie: sidCookie },
+    });
+    expect((secondGet.json() as { contentHtml: string }).contentHtml).toContain(
+      "<h1>Original heading</h1>",
+    );
+
+    const update = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/wiki/pages/${pageId}`,
+      headers: { cookie, "x-csrf-token": token },
+      payload: { content: "# Updated heading" },
+    });
+    expect(update.statusCode).toBe(200);
+
+    // The very next GET after the edit must never serve the pre-edit render (feature #101 step
+    // 2/3's own required assertion) — it must reflect the new content instead.
+    const afterEditGet = await app.inject({
+      method: "GET",
+      url: `/api/v1/wiki/pages/${pageId}`,
+      headers: { cookie: sidCookie },
+    });
+    expect(afterEditGet.statusCode).toBe(200);
+    const afterEditHtml = (afterEditGet.json() as { contentHtml: string }).contentHtml;
+    expect(afterEditHtml).toContain("<h1>Updated heading</h1>");
+    expect(afterEditHtml).not.toContain("Original heading");
+
+    await apiGatewayModule.onDisable();
+  });
+
   it("delete: an editor (not admin) is rejected with 403; an admin can delete, after which the page 404s", async () => {
     const app = await loadServer();
     const { sidCookie: editorSid } = await loginAs(app, "editor");

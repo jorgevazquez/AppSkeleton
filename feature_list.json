@@ -1297,7 +1297,7 @@
       "Write a test asserting a stale cached render is never served after an edit"
     ],
     "depends_on": [88, 95],
-    "passes": false
+    "passes": true
   },
   {
     "id": 102,

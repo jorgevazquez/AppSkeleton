@@ -116,6 +116,7 @@ import {
   renderPageFormHtml,
 } from "./src/page-form.js";
 import { createWikiPagesStore, type WikiDbQueryCapability } from "./src/pages.js";
+import { createWikiRenderCache, type WikiRenderCache } from "./src/render-cache.js";
 import { createWikiRevisionsStore } from "./src/revisions.js";
 import { searchWikiPages } from "./src/search.js";
 import {
@@ -149,6 +150,18 @@ const RENDER_TEMPLATE_CAPABILITY_ID = "render:template";
  * audited, exactly like `rbac/index.ts`'s own optional sink.
  */
 export const auditState: { sink: AuditSink | undefined } = { sink: undefined };
+
+/**
+ * Backing state for this plugin's rendered-page cache (feature #101 —
+ * "Wiki rendered-page caching with invalidation on edit"). Held in a
+ * mutable container and replaced with a fresh {@link WikiRenderCache}
+ * instance in {@link onInstall}, mirroring {@link auditState}'s own
+ * reset-per-plugin-load precedent immediately above — so two separate
+ * plugin loads (e.g. two independent test suites in the same process) never
+ * share cache entries or revision counters. See `./src/render-cache.ts`'s
+ * module doc for the full caching/invalidation design.
+ */
+export const renderCacheState: { cache: WikiRenderCache } = { cache: createWikiRenderCache() };
 
 /**
  * Resolve the calling user's identity from their session cookie (feature
@@ -643,16 +656,28 @@ function registerWikiRoutes(
         throw new NotFoundError(`Page with id ${id} does not exist.`, { details: { id } });
       }
 
-      const renderTemplate = obtainRenderTemplate(capabilities);
-      const rendered = renderMarkdownToHtml(page.content, renderTemplate.render);
-      if (isErr(rendered)) {
-        throw new RenderError(
-          `Failed to render page ${id}'s Markdown content to HTML: ${rendered.error.message}`,
-          { details: { id }, cause: rendered.error },
-        );
+      // Feature #101 step 1: serve this page's already-rendered HTML, keyed
+      // by page id + revision id, instead of re-rendering unchanged
+      // Markdown on every read — see `./src/render-cache.ts`'s module doc.
+      const revisionId = renderCacheState.cache.currentRevisionId(id);
+      const cachedHtml = renderCacheState.cache.get(id, revisionId);
+      let contentHtml: string;
+      if (cachedHtml !== undefined) {
+        contentHtml = cachedHtml;
+      } else {
+        const renderTemplate = obtainRenderTemplate(capabilities);
+        const rendered = renderMarkdownToHtml(page.content, renderTemplate.render);
+        if (isErr(rendered)) {
+          throw new RenderError(
+            `Failed to render page ${id}'s Markdown content to HTML: ${rendered.error.message}`,
+            { details: { id }, cause: rendered.error },
+          );
+        }
+        contentHtml = rendered.value;
+        renderCacheState.cache.set(id, revisionId, contentHtml);
       }
 
-      return { ...toPageJson(page), contentHtml: rendered.value };
+      return { ...toPageJson(page), contentHtml };
     },
   });
 
@@ -712,6 +737,9 @@ function registerWikiRoutes(
 
       const { authorized } = obtainWikiStores(capabilities);
       const page = await authorized.updatePage(userId, id, body);
+      // Feature #101 step 2: invalidate immediately on any edit — the very
+      // next GET for this page id can never be served the pre-edit render.
+      renderCacheState.cache.invalidate(id);
       return toPageJson(page);
     },
   });
@@ -732,6 +760,10 @@ function registerWikiRoutes(
 
       const { authorized } = obtainWikiStores(capabilities);
       await authorized.deletePage(userId, id);
+      // A deleted page can never be re-rendered, so drop any cached entry
+      // for it (feature #101) rather than leaking it for the rest of the
+      // process's lifetime.
+      renderCacheState.cache.invalidate(id);
       return { id, deleted: true };
     },
   });
@@ -1094,6 +1126,7 @@ function registerWikiRoutes(
  */
 export function onInstall(context: PluginLifecycleContext): void {
   auditState.sink = context.auditSink;
+  renderCacheState.cache = createWikiRenderCache();
 }
 
 /**
