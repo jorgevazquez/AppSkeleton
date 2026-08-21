@@ -89,6 +89,13 @@ npm run format        # prettier --write
 npm run format:check  # prettier --check
 ```
 
+## Operating a deployment
+
+See [`docs/operator-guide.md`](./docs/operator-guide.md) for environment
+configuration, how to add a new plugin to a running deployment, and how
+capability grants (the kernel's inter-plugin permission mechanism) are
+actually managed.
+
 ## Project state
 
 - `feature_list.json` — the build backlog, source of truth for what's done.

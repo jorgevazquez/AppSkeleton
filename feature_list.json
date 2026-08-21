@@ -1464,7 +1464,7 @@
       "Have it reviewed against the actual current behavior of the kernel (no aspirational/inaccurate claims)"
     ],
     "depends_on": [78, 2],
-    "passes": false
+    "passes": true
   },
   {
     "id": 115,
