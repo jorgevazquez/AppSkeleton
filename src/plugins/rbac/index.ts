@@ -100,6 +100,8 @@
 import type { AuditSink } from "../../core/audit.js";
 import { NotFoundError, ValidationError } from "../../core/errors.js";
 import type { PluginLifecycleContext } from "../../core/loader.js";
+import { isErr } from "../../core/types.js";
+import type { HttpRouteCapability } from "../api-gateway/index.js";
 import {
   createConsoleBootstrapAdminReporter,
   ensureBootstrapAdmin,
@@ -113,6 +115,11 @@ import {
   type RbacManagementStore,
 } from "./src/manage.js";
 import { can, type PolicyStore } from "./src/policy.js";
+import {
+  loadSessionIdentityConfig,
+  resolveUserId as resolveUserIdFromSession,
+  type RequestWithCookies,
+} from "./src/session-identity.js";
 import type { Permission, Role, RolePermission, UserRole } from "./src/types.js";
 
 /**
@@ -503,6 +510,255 @@ export const provides: Readonly<Record<string, unknown>> = {
   "rbac:manage": managementApi,
 };
 
+// ---------------------------------------------------------------------------
+// RBAC admin HTTP routes (feature #44 — "RBAC admin HTTP routes (list/
+// create/update roles, assign/revoke permissions)")
+// ---------------------------------------------------------------------------
+//
+// Step 1 — registered through the api-gateway `http:route` capability
+// (feature #59, `../api-gateway/src/route-capability.ts`), each protected by
+// `registerRoute()`'s own `requiredPermission: "rbac:manage"` option: unlike
+// the wiki plugin's dynamic, per-namespace authorization (feature #94's own
+// module docs explain why *that* plugin can't use `requiredPermission`),
+// every operation `rbac:manage` exposes is gated on the exact same single,
+// global `rbac:manage` permission (see `./src/manage.ts`'s `MANAGE_RESOURCE`/
+// `MANAGE_ACTION`) — a static permission string is precisely the tool
+// `requiredPermission` was built for (feature #65). Api-gateway's own
+// `rbac:check`-backed `preHandler` hook (`../api-gateway/src/rbac-
+// protection.ts`) therefore resolves the caller's identity from their
+// session cookie and checks `rbac:check(userId, "manage", "rbac")` *before*
+// any route handler below ever runs — a caller with no valid session gets
+// {@link AuthenticationError} (401); a caller whose roles don't grant
+// `rbac:manage` gets {@link AuthorizationError} (403), exactly matching this
+// feature's own step 3 ("as an admin (allowed) and as a viewer (403
+// denied)"). `./src/manage.ts`'s own `assertCanManage` then checks the very
+// same permission a second time, inside {@link managementApi} itself — see
+// that module's "Self-referential authorization" docs; the two checks are
+// deliberately redundant defense-in-depth (this route layer is not the only
+// caller `managementApi` has, or ever will have), not a bug.
+//
+// Step 2 — every route below declares both a request-shape schema and a
+// response schema, exactly like every other `registerRoute()` caller in this
+// codebase (`route-capability.ts`'s own `assertDeclaresRequestAndResponseSchema`
+// runtime backstop refuses to register a route missing either).
+//
+// ## Why this plugin now needs `depends_on: { "api-gateway": ... }`
+//
+// `registerRoute()` must be called *synchronously*, once, during this
+// plugin's own `onEnable`, for these routes to exist at all —
+// `capabilities.obtain()` only succeeds once a provider has actually
+// registered with the broker, and plugin load order is driven purely by
+// `depends_on` (`core/graph.ts`), not by `capabilities.requires`. Without a
+// hard `depends_on` on `api-gateway` there would be no guarantee
+// api-gateway's own `onEnable` (which registers `http:route`, see
+// `../api-gateway/index.ts`) has already run by the time this plugin's
+// `onEnable` does — the exact same load-order race the `wiki` plugin's own
+// module docs (feature #94) already document and resolve the same way. This
+// does not introduce a cycle: `api-gateway`'s own manifest declares no
+// `depends_on` at all (only a lazily-obtained `capabilities.requires` on
+// `rbac:check`, resolved per-request inside its own `preHandler` hook, never
+// synchronously at `onEnable` time — see `rbac-protection.ts`'s own module
+// docs), so `api-gateway` can always load first.
+
+/** Capability id `api-gateway` registers `registerRoute()`/`getApp()` under (feature #59). */
+const HTTP_ROUTE_CAPABILITY_ID = "http:route";
+
+/** Resolve the calling user's identity from their session cookie (feature #63) via `./src/session-identity.ts` — see that module's doc comment for why this can't just import api-gateway's own `session.ts` directly. `undefined` means "no valid session"; unreachable in practice for these routes since api-gateway's own `requiredPermission` preHandler hook already rejects an unauthenticated request with a 401 before any handler below runs — resolved independently here anyway, exactly like the wiki plugin's own routes (feature #94), rather than threading the hook's already-resolved identity through some new, bespoke channel. */
+function resolveUserId(request: RequestWithCookies): string | undefined {
+  return resolveUserIdFromSession(request, loadSessionIdentityConfig());
+}
+
+/** JSON-safe projection of a {@link Role} — Fastify's response-schema serializer only ever emits properties the schema itself declares, so every field a route wants back must be listed explicitly (see this module's schema constants below). */
+function toRoleJson(role: Role): Record<string, unknown> {
+  return role.description === undefined
+    ? { id: role.id, name: role.name }
+    : { id: role.id, name: role.name, description: role.description };
+}
+
+const ROLE_ID_PARAMS_SCHEMA = {
+  type: "object",
+  properties: { id: { type: "string" } },
+  required: ["id"],
+  additionalProperties: false,
+};
+
+const ROLE_PERMISSION_PARAMS_SCHEMA = {
+  type: "object",
+  properties: { id: { type: "string" }, permissionId: { type: "string" } },
+  required: ["id", "permissionId"],
+  additionalProperties: false,
+};
+
+const ROLE_SCHEMA = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    name: { type: "string" },
+    description: { type: "string" },
+  },
+  required: ["id", "name"],
+};
+
+const LIST_ROLES_RESPONSE_SCHEMA = {
+  type: "object",
+  properties: { roles: { type: "array", items: ROLE_SCHEMA } },
+  required: ["roles"],
+};
+
+const CREATE_ROLE_BODY_SCHEMA = {
+  type: "object",
+  properties: {
+    id: { type: "string", minLength: 1 },
+    name: { type: "string", minLength: 1 },
+    description: { type: "string" },
+  },
+  required: ["id", "name"],
+  additionalProperties: false,
+};
+
+const UPDATE_ROLE_BODY_SCHEMA = {
+  type: "object",
+  properties: {
+    name: { type: "string", minLength: 1 },
+    description: { type: ["string", "null"] },
+  },
+  additionalProperties: false,
+};
+
+const ASSIGN_PERMISSION_BODY_SCHEMA = {
+  type: "object",
+  properties: { permissionId: { type: "string", minLength: 1 } },
+  required: ["permissionId"],
+  additionalProperties: false,
+};
+
+const ASSIGN_PERMISSION_RESPONSE_SCHEMA = {
+  type: "object",
+  properties: {
+    roleId: { type: "string" },
+    permissionId: { type: "string" },
+    assigned: { type: "boolean" },
+  },
+  required: ["roleId", "permissionId", "assigned"],
+};
+
+const REVOKE_PERMISSION_RESPONSE_SCHEMA = {
+  type: "object",
+  properties: {
+    roleId: { type: "string" },
+    permissionId: { type: "string" },
+    revoked: { type: "boolean" },
+  },
+  required: ["roleId", "permissionId", "revoked"],
+};
+
+/** An explicit "no query input accepted" schema, reused by every route below with no querystring of its own — same shape as `../api-gateway/index.ts`'s `NO_INPUT_QUERYSTRING_SCHEMA`/the wiki plugin's own constant of the same name. */
+const NO_INPUT_QUERYSTRING_SCHEMA = {
+  type: "object",
+  properties: {},
+  additionalProperties: false,
+};
+
+/**
+ * Register every RBAC admin HTTP route on `registrar` (feature #59's
+ * `registerRoute()`) — see this module's own "RBAC admin HTTP routes"
+ * section doc comment above for the full step 1/step 2 rationale. Called
+ * once from {@link onEnable}, after `http:route` has been obtained.
+ */
+function registerRbacManagementRoutes(registrar: HttpRouteCapability): void {
+  // GET /rbac/roles — list (step 1: "list roles").
+  registrar.registerRoute({
+    method: "GET",
+    path: "/rbac/roles",
+    schema: {
+      querystring: NO_INPUT_QUERYSTRING_SCHEMA,
+      response: { 200: LIST_ROLES_RESPONSE_SCHEMA },
+    },
+    requiredPermission: "rbac:manage",
+    handler: async (request) => {
+      const callerId = resolveUserId(request) ?? "";
+      const roles = await managementApi.listRoles(callerId);
+      return { roles: roles.map(toRoleJson) };
+    },
+  });
+
+  // POST /rbac/roles — create (step 1: "create roles").
+  registrar.registerRoute({
+    method: "POST",
+    path: "/rbac/roles",
+    schema: {
+      body: CREATE_ROLE_BODY_SCHEMA,
+      response: { 201: ROLE_SCHEMA },
+    },
+    requiredPermission: "rbac:manage",
+    handler: async (request, reply) => {
+      const callerId = resolveUserId(request) ?? "";
+      const body = request.body as { id: string; name: string; description?: string };
+      const role = await managementApi.createRole(callerId, body);
+      reply.status(201);
+      return toRoleJson(role);
+    },
+  });
+
+  // PATCH /rbac/roles/:id — update (step 1: "update roles").
+  registrar.registerRoute({
+    method: "PATCH",
+    path: "/rbac/roles/:id",
+    schema: {
+      params: ROLE_ID_PARAMS_SCHEMA,
+      body: UPDATE_ROLE_BODY_SCHEMA,
+      response: { 200: ROLE_SCHEMA },
+    },
+    requiredPermission: "rbac:manage",
+    handler: async (request) => {
+      const callerId = resolveUserId(request) ?? "";
+      const params = request.params as { id: string };
+      const body = request.body as { name?: string; description?: string | null };
+      const role = await managementApi.updateRole(callerId, params.id, body);
+      return toRoleJson(role);
+    },
+  });
+
+  // POST /rbac/roles/:id/permissions — assign a permission to a role
+  // (step 1: "assign ... permissions").
+  registrar.registerRoute({
+    method: "POST",
+    path: "/rbac/roles/:id/permissions",
+    schema: {
+      params: ROLE_ID_PARAMS_SCHEMA,
+      body: ASSIGN_PERMISSION_BODY_SCHEMA,
+      response: { 201: ASSIGN_PERMISSION_RESPONSE_SCHEMA },
+    },
+    requiredPermission: "rbac:manage",
+    handler: async (request, reply) => {
+      const callerId = resolveUserId(request) ?? "";
+      const params = request.params as { id: string };
+      const body = request.body as { permissionId: string };
+      await managementApi.assignPermissionToRole(callerId, params.id, body.permissionId);
+      reply.status(201);
+      return { roleId: params.id, permissionId: body.permissionId, assigned: true };
+    },
+  });
+
+  // DELETE /rbac/roles/:id/permissions/:permissionId — revoke a permission
+  // from a role (step 1: "revoke ... permissions").
+  registrar.registerRoute({
+    method: "DELETE",
+    path: "/rbac/roles/:id/permissions/:permissionId",
+    schema: {
+      params: ROLE_PERMISSION_PARAMS_SCHEMA,
+      response: { 200: REVOKE_PERMISSION_RESPONSE_SCHEMA },
+    },
+    requiredPermission: "rbac:manage",
+    handler: async (request) => {
+      const callerId = resolveUserId(request) ?? "";
+      const params = request.params as { id: string; permissionId: string };
+      await managementApi.revokePermissionFromRole(callerId, params.id, params.permissionId);
+      return { roleId: params.id, permissionId: params.permissionId, revoked: true };
+    },
+  });
+}
+
 /**
  * The {@link BootstrapAdminStore} feature #40's safety mechanism reads/
  * mutates — the same in-memory {@link policyStore}/{@link roleCatalog}
@@ -540,12 +796,19 @@ export async function ensureRbacBootstrapAdmin(
 
 /**
  * The loader's second lifecycle hook (feature #40) — runs after {@link
- * onInstall}. Unlike `onInstall`, this hook needs none of {@link
- * PluginLifecycleContext}'s fields; it exists solely so the loader's
- * declare-before-hooks ordering gives this plugin one guaranteed
- * "just finished loading" moment per `loadPlugins()` call to check
- * "does an admin exist yet" and self-heal if not.
+ * onInstall}. Originally needed none of {@link PluginLifecycleContext}'s
+ * fields (see this doc comment's own history); feature #44 adds a second
+ * responsibility — obtaining `http:route` and registering every RBAC admin
+ * route on it (see this module's "RBAC admin HTTP routes" section doc
+ * comment above for why that must happen here, synchronously, rather than
+ * lazily like `rbac:check`/`rbac:manage` themselves).
  */
-export async function onEnable(_context: PluginLifecycleContext): Promise<void> {
+export async function onEnable(context: PluginLifecycleContext): Promise<void> {
   await ensureRbacBootstrapAdmin();
+
+  const obtained = context.capabilities.obtain<HttpRouteCapability>(HTTP_ROUTE_CAPABILITY_ID);
+  if (isErr(obtained)) {
+    throw obtained.error;
+  }
+  registerRbacManagementRoutes(obtained.value);
 }

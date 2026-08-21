@@ -499,7 +499,7 @@ These two shipped plugins are the reference implementations this document
 points to (per feature #78's own requirement) because between them they
 cover the two shapes almost every new plugin will be one of.
 
-### 7.1 `rbac` — a self-contained, dependency-free capability provider
+### 7.1 `rbac` — a capability provider that also mounts its own admin HTTP routes
 
 `src/plugins/rbac/plugin.json`:
 
@@ -507,10 +507,10 @@ cover the two shapes almost every new plugin will be one of.
 {
   "id": "rbac",
   "version": "0.1.0",
-  "depends_on": {},
+  "depends_on": { "api-gateway": "^0.1.0" },
   "capabilities": {
     "provides": ["rbac:check", "rbac:manage"],
-    "requires": []
+    "requires": ["http:route"]
   },
   "entry_point": "index.ts"
 }
@@ -550,10 +550,23 @@ What to copy from `src/plugins/rbac/index.ts`:
   directly, without needing a management API to go through first. If your
   plugin has in-memory state a test will need to manipulate directly,
   follow this precedent rather than hiding it.
-- **No `depends_on`, no `capabilities.requires`.** `rbac` needs nothing
-  from any other plugin to function. If your plugin is similarly
-  self-contained, your manifest should look like this — resist the urge to
-  add a `depends_on`/`requires` entry "just in case."
+- **`depends_on`/`capabilities.requires` are added only when a lifecycle
+  hook genuinely needs them synchronously.** `rbac:check`/`rbac:manage`
+  themselves need nothing from any other plugin — they're stable closures
+  built at module scope, exactly like the bullet above. But `rbac`'s own
+  admin HTTP routes (`registerRoute()`, called from `onEnable`) must obtain
+  `http:route` _synchronously_, and `capabilities.obtain()` only succeeds
+  once a provider has actually registered with the broker — so the
+  manifest adds a hard `depends_on: { "api-gateway": "^0.1.0" }` (load
+  order, driven by `depends_on`, not `capabilities.requires`) alongside
+  `capabilities.requires: ["http:route"]` (the broker's own declare-gating
+  for the `obtain()` call itself). If your plugin's capability
+  implementation is similarly self-contained but it _also_ needs to call
+  another plugin's capability synchronously from a lifecycle hook (as
+  opposed to lazily, inside a request handler — see `api-gateway`'s own
+  `rbac-protection.ts` for that alternative), follow this same pairing;
+  resist adding either "just in case" when nothing you register actually
+  needs it synchronously.
 
 ### 7.2 `database-mysql` — config-gated, async setup, migrations
 
@@ -603,9 +616,14 @@ What to copy from `src/plugins/database-mysql/index.ts`:
 ### 7.3 What to imitate for your own plugin
 
 - If your plugin needs nothing external and its capability implementation
-  is pure/stateless-enough to build at module scope: follow §7.1 (`rbac`).
-  Minimal manifest (`depends_on: {}`, no `requires`), no `onEnable` at all
-  if there's nothing asynchronous to do.
+  is pure/stateless-enough to build at module scope: follow §7.1 (`rbac`)'s
+  `provides`-at-module-scope/exported-mutable-state pattern. Minimal
+  manifest (`depends_on: {}`, no `requires`), no `onEnable` at all if
+  there's nothing asynchronous to do — `html-renderer`'s own
+  `plugin.json` is the current example of that minimal shape end to end,
+  now that `rbac`'s own manifest has grown a `depends_on`/`requires` pair
+  for its admin HTTP routes (see §7.1's own bullets for why that doesn't
+  contradict the module-scope `provides` pattern).
 - If your plugin needs configuration, an external connection, or anything
   that can fail at startup and must fail loudly: follow §7.2
   (`database-mysql`) — validate config in `onInstall`, stand up resources

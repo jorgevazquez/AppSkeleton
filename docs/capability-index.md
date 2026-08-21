@@ -11,7 +11,7 @@
 | `hello-world` | _(none)_ | _(none)_ |
 | `html-renderer` | `render:template`, `html:error-pages` | _(none)_ |
 | `plugin-builder` | _(none)_ | _(none)_ |
-| `rbac` | `rbac:check`, `rbac:manage` | _(none)_ |
+| `rbac` | `rbac:check`, `rbac:manage` | `http:route` |
 | `wiki` | _(none)_ | `rbac:check`, `db:query`, `render:template`, `http:route` |
 
 ## By capability
@@ -22,7 +22,7 @@
 | `db:query` | `database-mysql` | `wiki` |
 | `db:transaction` | `database-mysql` | _(none)_ |
 | `html:error-pages` | `html-renderer` | `api-gateway` |
-| `http:route` | `api-gateway` | `wiki` |
+| `http:route` | `api-gateway` | `rbac`, `wiki` |
 | `rbac:check` | `rbac` | `api-gateway`, `wiki` |
 | `rbac:manage` | `rbac` | _(none)_ |
 | `render:template` | `html-renderer` | `api-gateway`, `wiki` |

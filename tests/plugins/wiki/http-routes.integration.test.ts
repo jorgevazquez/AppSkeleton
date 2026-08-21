@@ -129,7 +129,11 @@ const API_GATEWAY_MANIFEST = manifest("api-gateway", {
   provides: ["http:route"],
   requires: ["rbac:check", "render:template", "html:error-pages"],
 });
-const RBAC_MANIFEST = manifest("rbac", { provides: ["rbac:check", "rbac:manage"] });
+const RBAC_MANIFEST = manifest("rbac", {
+  dependsOn: { "api-gateway": "^1.0.0" },
+  provides: ["rbac:check", "rbac:manage"],
+  requires: ["http:route"],
+});
 const HTML_RENDERER_MANIFEST = manifest("html-renderer", {
   provides: ["render:template", "html:error-pages"],
 });

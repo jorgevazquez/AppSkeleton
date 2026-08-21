@@ -135,6 +135,7 @@ describe("rbac role/permission management API (feature #36)", () => {
       store.roles.set("editor", { id: "editor", name: "Editor" });
       store.permissions.set("wiki:edit", { id: "wiki:edit", resource: "wiki", action: "edit" });
 
+      await expect(api.listRoles(OUTSIDER)).rejects.toBeInstanceOf(CapabilityDeniedError);
       await expect(
         api.createRole(OUTSIDER, { id: "viewer", name: "Viewer" }),
       ).rejects.toBeInstanceOf(CapabilityDeniedError);
@@ -178,6 +179,24 @@ describe("rbac role/permission management API (feature #36)", () => {
       const role = await api.createRole(ADMIN, { id: "editor", name: "Editor" });
       expect(role).toEqual({ id: "editor", name: "Editor" });
       expect(store.roles.get("editor")).toEqual(role);
+    });
+  });
+
+  describe("listRoles (feature #44, step 1 — 'list roles')", () => {
+    it("returns every currently-defined role for an authorized caller", async () => {
+      await expect(api.listRoles(ADMIN)).resolves.toEqual([]);
+
+      await api.createRole(ADMIN, { id: "editor", name: "Editor" });
+      await api.createRole(ADMIN, { id: "viewer", name: "Viewer" });
+
+      const roles = await api.listRoles(ADMIN);
+      expect(roles).toEqual(
+        expect.arrayContaining([
+          { id: "editor", name: "Editor" },
+          { id: "viewer", name: "Viewer" },
+        ]),
+      );
+      expect(roles).toHaveLength(2);
     });
   });
 

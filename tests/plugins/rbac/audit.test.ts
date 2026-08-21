@@ -16,7 +16,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createInMemoryAuditSink } from "../../../src/core/audit.js";
 import { createCapabilityBroker } from "../../../src/core/broker.js";
-import { loadPlugins, type PluginDefinition } from "../../../src/core/loader.js";
+import { loadPlugins, type PluginDefinition, type PluginModule } from "../../../src/core/loader.js";
 import type { PluginManifest } from "../../../src/core/manifest.js";
 import { isOk } from "../../../src/core/types.js";
 import * as rbacModule from "../../../src/plugins/rbac/index.js";
@@ -24,24 +24,46 @@ import type { RbacCheckCapability } from "../../../src/plugins/rbac/index.js";
 
 function manifest(
   id: string,
-  options: { provides?: string[]; requires?: string[] } = {},
+  options: { dependsOn?: Record<string, string>; provides?: string[]; requires?: string[] } = {},
 ): PluginManifest {
   return {
     id,
     version: "1.0.0",
-    depends_on: {},
+    depends_on: options.dependsOn ?? {},
     capabilities: { provides: options.provides ?? [], requires: options.requires ?? [] },
     entry_point: "index.ts",
   };
 }
 
-const RBAC_MANIFEST = manifest("rbac", { provides: ["rbac:check"] });
+/**
+ * A minimal `http:route` provider — feature #44 made `rbac`'s own
+ * `onEnable` obtain `http:route` synchronously (to register its admin
+ * routes), so `loadRbacWithAudit()` below now needs *some* provider for
+ * it, exactly like every other `http:route`-consuming plugin's own test
+ * fixtures already require. This fixture only records calls — it never
+ * spins up a real Fastify instance — since this file's own tests only care
+ * about `check()`'s audit logging, not about the routes feature #44
+ * registers.
+ */
+const HTTP_ROUTE_FIXTURE_MANIFEST = manifest("http-route-fixture", { provides: ["http:route"] });
+function httpRouteFixtureModule(): PluginModule {
+  return { provides: { "http:route": { registerRoute: () => {} } } };
+}
+
+const RBAC_MANIFEST = manifest("rbac", {
+  dependsOn: { "http-route-fixture": "^1.0.0" },
+  provides: ["rbac:check"],
+  requires: ["http:route"],
+});
 
 /** Load the real rbac plugin through the real loader, wired to `auditSink`, and return its `check()`. */
 async function loadRbacWithAudit(
   auditSink: ReturnType<typeof createInMemoryAuditSink>,
 ): Promise<RbacCheckCapability["check"]> {
-  const definitions: PluginDefinition[] = [{ manifest: RBAC_MANIFEST, module: rbacModule }];
+  const definitions: PluginDefinition[] = [
+    { manifest: HTTP_ROUTE_FIXTURE_MANIFEST, module: httpRouteFixtureModule() },
+    { manifest: RBAC_MANIFEST, module: rbacModule },
+  ];
   const broker = createCapabilityBroker();
 
   const loadResult = await loadPlugins(definitions, broker, { auditSink });

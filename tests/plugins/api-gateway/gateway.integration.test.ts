@@ -72,7 +72,11 @@ const API_GATEWAY_MANIFEST = manifest("api-gateway", {
   provides: ["http:route"],
   requires: ["rbac:check"],
 });
-const RBAC_MANIFEST = manifest("rbac", { provides: ["rbac:check", "rbac:manage"] });
+const RBAC_MANIFEST = manifest("rbac", {
+  dependsOn: { "api-gateway": "^1.0.0" },
+  provides: ["rbac:check", "rbac:manage"],
+  requires: ["http:route"],
+});
 
 function getHttpRoute(): HttpRouteCapability {
   return apiGatewayModule.provides?.["http:route"] as HttpRouteCapability;
