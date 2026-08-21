@@ -27,6 +27,7 @@
     "generate:manifest-schema": "tsx src/plugins/plugin-builder/src/generate-manifest-json-schema.ts",
     "generate:capability-index": "tsx src/plugins/plugin-builder/src/generate-capability-index.ts",
     "load-test": "tsx scripts/load-test.ts",
+    "kernel-benchmark": "tsx scripts/kernel-dispatch-benchmark.ts",
     "capability-audit": "tsx scripts/capability-audit.ts",
     "prepare": "husky"
   },

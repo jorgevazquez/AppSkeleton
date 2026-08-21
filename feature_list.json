@@ -1527,7 +1527,7 @@
       "Flag in the doc what overhead budget future plugins should stay within"
     ],
     "depends_on": [12],
-    "passes": false
+    "passes": true
   },
   {
     "id": 120,
