@@ -17,6 +17,17 @@
  *     (e.g. "x") can't slip through validation, though operators should use
  *     a much longer random string in practice — see `.env.example`'s own
  *     "change-me-to-a-long-random-string" placeholder.
+ *
+ *     That placeholder is itself 34 characters long — long enough to pass
+ *     the length check above — so a deployment that copies `.env.example`
+ *     to `.env` (step 1 of `init.sh`) and never edits `SESSION_SECRET`
+ *     would otherwise boot "successfully" while signing every session with
+ *     a value published in this very repo's git history (docs/security-review.md,
+ *     OWASP A02/A05). {@link SessionConfigSchema} additionally rejects that
+ *     exact literal value (case-insensitively) — a deployment that never
+ *     changed it fails fast with a `ConfigError` naming the field, exactly
+ *     like a missing/too-short secret does, rather than booting with a
+ *     publicly-known signing key.
  *   - `COOKIE_SECURE` — whether the session cookie's `Secure` attribute is
  *     set (spec.md: "secure session cookies (HttpOnly, Secure, SameSite=Lax
  *     by default)"). Config-driven rather than hard-coded `true` because a
@@ -78,10 +89,22 @@ export function loadCookieConfig(
   return loadConfig({ schema: CookieConfigSchema, ...options });
 }
 
+/**
+ * The exact placeholder `.env.example` ships for `SESSION_SECRET`. Long
+ * enough to pass the `.min(16)` check below on its own, so it needs its own,
+ * explicit rejection — see {@link SessionConfigSchema}'s docs ("That
+ * placeholder is itself 34 characters long...").
+ */
+const EXAMPLE_SESSION_SECRET_PLACEHOLDER = "change-me-to-a-long-random-string";
+
 export const SessionConfigSchema = z.object({
   SESSION_SECRET: z
     .string()
-    .min(16, "must be at least 16 characters — use a long random string, not a guessable value"),
+    .min(16, "must be at least 16 characters — use a long random string, not a guessable value")
+    .refine((value) => value.toLowerCase() !== EXAMPLE_SESSION_SECRET_PLACEHOLDER, {
+      message:
+        "must not be the unchanged .env.example placeholder value — set a real, unique random secret",
+    }),
   COOKIE_SECURE: booleanFromEnv.default(true),
   SESSION_COOKIE_NAME: z.string().min(1, "must not be empty").default("sid"),
 });

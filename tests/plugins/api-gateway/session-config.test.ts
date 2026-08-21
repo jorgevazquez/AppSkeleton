@@ -51,6 +51,18 @@ describe("loadSessionConfig — SESSION_SECRET is required and fails fast", () =
     expect(() => loadSessionConfig({ env: { SESSION_SECRET: "short" } })).toThrow(ConfigError);
   });
 
+  it("rejects the unchanged .env.example SESSION_SECRET placeholder (OWASP A02/A05: a copied-but-never-edited .env would otherwise boot with a publicly-known signing key)", () => {
+    expect(() =>
+      loadSessionConfig({ env: { SESSION_SECRET: "change-me-to-a-long-random-string" } }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects the placeholder case-insensitively too", () => {
+    expect(() =>
+      loadSessionConfig({ env: { SESSION_SECRET: "CHANGE-ME-TO-A-LONG-RANDOM-STRING" } }),
+    ).toThrow(ConfigError);
+  });
+
   it("loads successfully with only SESSION_SECRET set, defaulting the rest", () => {
     const config = loadSessionConfig({ env: VALID_ENV });
     expect(config).toEqual({
