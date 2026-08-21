@@ -59,9 +59,25 @@
  * `(userId, action, resource)` triple — a caller who checks
  * `rbac:check("bob", "read", "wiki")` directly and one who calls
  * `getPageById("bob", ...)` through this module should always agree.
+ *
+ * ## Wiki-level audit trail (feature #98)
+ *
+ * Every method now takes an optional trailing `auditSink` (see {@link
+ * createAuthorizedWikiStore}). A denial from `assertWikiAccessAudited`
+ * (`./access.ts`) — 401 or 403, either one — is recorded as a
+ * `"permission-denied"` entry with the caller's identity and the specific
+ * page (or namespace) identity involved; `createPage`/`updatePage`/
+ * `deletePage` additionally record a `"created"`/`"updated"`/`"deleted"`
+ * entry once the underlying store call has actually succeeded. Successful
+ * reads are deliberately never recorded — see `./access.ts`'s own docs for
+ * why. `auditSink` is optional and tolerated as missing everywhere (a
+ * no-op, per `./access.ts`'s `recordWikiAudit`), so every existing caller/
+ * test that builds this store with only 3 arguments keeps working
+ * unchanged.
  */
+import type { AuditSink } from "../../../core/audit.js";
 import type { RbacCheckCapability } from "../../rbac/index.js";
-import { assertWikiAccess } from "./access.js";
+import { assertWikiAccessAudited, recordWikiAudit, wikiAuditTarget } from "./access.js";
 import type { WikiPagesStore } from "./pages.js";
 import type { WikiRevisionsStore } from "./revisions.js";
 import type { CreatePageInput, Page, Revision, UpdatePageInput } from "./types.js";
@@ -108,44 +124,117 @@ export function createAuthorizedWikiStore(
   pages: WikiPagesStore,
   revisions: WikiRevisionsStore,
   rbacCheck: RbacCheckCapability,
+  auditSink?: AuditSink,
 ): AuthorizedWikiStore {
   return {
     async createPage(userId, input) {
-      assertWikiAccess(rbacCheck, userId, "write", input.namespaceId);
-      return pages.createPage(input);
+      assertWikiAccessAudited(
+        auditSink,
+        rbacCheck,
+        userId,
+        "write",
+        wikiAuditTarget(undefined, input.namespaceId, input.slug),
+        input.namespaceId,
+      );
+      const page = await pages.createPage(input);
+      recordWikiAudit(auditSink, {
+        actor: userId,
+        action: "wiki:create",
+        target: wikiAuditTarget(page.id, page.namespaceId, page.slug),
+        outcome: "created",
+        details: { namespaceId: page.namespaceId, slug: page.slug },
+      });
+      return page;
     },
 
     async getPageById(userId, id) {
       const page = await pages.getPageById(id);
-      assertWikiAccess(rbacCheck, userId, "read", page?.namespaceId);
+      assertWikiAccessAudited(
+        auditSink,
+        rbacCheck,
+        userId,
+        "read",
+        wikiAuditTarget(id, page?.namespaceId),
+        page?.namespaceId,
+      );
       return page;
     },
 
     async getPageBySlug(userId, namespaceId, slug) {
-      assertWikiAccess(rbacCheck, userId, "read", namespaceId);
+      assertWikiAccessAudited(
+        auditSink,
+        rbacCheck,
+        userId,
+        "read",
+        wikiAuditTarget(undefined, namespaceId, slug),
+        namespaceId,
+      );
       return pages.getPageBySlug(namespaceId, slug);
     },
 
     async listPages(userId, namespaceId) {
-      assertWikiAccess(rbacCheck, userId, "read", namespaceId);
+      assertWikiAccessAudited(
+        auditSink,
+        rbacCheck,
+        userId,
+        "read",
+        wikiAuditTarget(undefined, namespaceId),
+        namespaceId,
+      );
       return pages.listPages(namespaceId);
     },
 
     async updatePage(userId, id, changes) {
       const existing = await pages.getPageById(id);
-      assertWikiAccess(rbacCheck, userId, "write", existing?.namespaceId);
-      return pages.updatePage(id, changes);
+      assertWikiAccessAudited(
+        auditSink,
+        rbacCheck,
+        userId,
+        "write",
+        wikiAuditTarget(id, existing?.namespaceId),
+        existing?.namespaceId,
+      );
+      const updated = await pages.updatePage(id, changes);
+      recordWikiAudit(auditSink, {
+        actor: userId,
+        action: "wiki:update",
+        target: wikiAuditTarget(updated.id, updated.namespaceId, updated.slug),
+        outcome: "updated",
+        details: { namespaceId: updated.namespaceId, slug: updated.slug },
+      });
+      return updated;
     },
 
     async deletePage(userId, id) {
       const existing = await pages.getPageById(id);
-      assertWikiAccess(rbacCheck, userId, "admin", existing?.namespaceId);
-      return pages.deletePage(id);
+      assertWikiAccessAudited(
+        auditSink,
+        rbacCheck,
+        userId,
+        "admin",
+        wikiAuditTarget(id, existing?.namespaceId),
+        existing?.namespaceId,
+      );
+      await pages.deletePage(id);
+      recordWikiAudit(auditSink, {
+        actor: userId,
+        action: "wiki:delete",
+        target: wikiAuditTarget(id, existing?.namespaceId, existing?.slug),
+        outcome: "deleted",
+        details: { namespaceId: existing?.namespaceId, slug: existing?.slug },
+      });
     },
 
     async listRevisions(userId, pageId) {
       const owningPage = await pages.getPageById(pageId);
-      assertWikiAccess(rbacCheck, userId, "read", owningPage?.namespaceId);
+      assertWikiAccessAudited(
+        auditSink,
+        rbacCheck,
+        userId,
+        "read",
+        wikiAuditTarget(pageId, owningPage?.namespaceId),
+        owningPage?.namespaceId,
+      );
       return revisions.listRevisions(pageId);
     },
   };

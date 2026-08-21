@@ -1259,7 +1259,7 @@
       "Write a test asserting an edit produces a queryable audit entry with the correct actor"
     ],
     "depends_on": [11, 87],
-    "passes": false
+    "passes": true
   },
   {
     "id": 99,

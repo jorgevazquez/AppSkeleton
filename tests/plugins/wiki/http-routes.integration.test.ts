@@ -35,6 +35,7 @@
 import mysql from "mysql2/promise";
 import type { Kysely } from "kysely";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createInMemoryAuditSink } from "../../../src/core/audit.js";
 import { createCapabilityBroker } from "../../../src/core/broker.js";
 import { loadPlugins, type PluginDefinition, type PluginModule } from "../../../src/core/loader.js";
 import type { PluginManifest } from "../../../src/core/manifest.js";
@@ -248,7 +249,7 @@ describe.runIf(mysqlReachable)("wiki HTTP routes — end-to-end over real HTTP (
     resetPolicyStoreForTests();
   });
 
-  async function loadServer() {
+  async function loadServer(auditSink?: ReturnType<typeof createInMemoryAuditSink>) {
     const definitions: PluginDefinition[] = [
       { manifest: API_GATEWAY_MANIFEST, module: apiGatewayModule },
       { manifest: RBAC_MANIFEST, module: rbacModule },
@@ -259,7 +260,11 @@ describe.runIf(mysqlReachable)("wiki HTTP routes — end-to-end over real HTTP (
     ];
 
     const broker = createCapabilityBroker();
-    const loadResult = await loadPlugins(definitions, broker);
+    const loadResult = await loadPlugins(
+      definitions,
+      broker,
+      auditSink !== undefined ? { auditSink } : {},
+    );
     expect(isOk(loadResult)).toBe(true);
     if (!isOk(loadResult)) {
       throw new Error("fixture plugin load unexpectedly failed");
@@ -748,6 +753,117 @@ describe.runIf(mysqlReachable)("wiki HTTP routes — end-to-end over real HTTP (
 
     expect(versioned.statusCode).toBe(200);
     expect(unversioned.statusCode).toBe(404);
+
+    await apiGatewayModule.onDisable();
+  });
+
+  it("audit: GET /api/v1/wiki/audit requires admin — an editor is rejected with 403", async () => {
+    const app = await loadServer(createInMemoryAuditSink());
+    const { sidCookie } = await loginAs(app, "editor");
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/wiki/audit",
+      headers: { cookie: sidCookie },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ code: "FORBIDDEN" });
+
+    await apiGatewayModule.onDisable();
+  });
+
+  it("audit: GET /api/v1/wiki/audit (feature #98, step 2) lists recent create/update/delete/permission-denied entries with actor and page identity, for an admin", async () => {
+    const auditSink = createInMemoryAuditSink();
+    const app = await loadServer(auditSink);
+    const { userId: editorId, sidCookie: editorSid } = await loginAs(app, "editor");
+    const { cookie: editorCookie, token: editorToken } = await obtainCsrf(app, editorSid);
+
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/v1/wiki/pages",
+      headers: { cookie: editorCookie, "x-csrf-token": editorToken },
+      payload: {
+        namespaceId: NAMESPACE_ID,
+        slug: "audit-target",
+        title: "Audit Target",
+        content: "v1",
+      },
+    });
+    expect(create.statusCode).toBe(201);
+    const pageId = (create.json() as { id: number }).id;
+
+    const update = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/wiki/pages/${pageId}`,
+      headers: { cookie: editorCookie, "x-csrf-token": editorToken },
+      payload: { content: "v2" },
+    });
+    expect(update.statusCode).toBe(200);
+
+    // Editor is not admin — this delete attempt is denied, and should be
+    // recorded as a "denied" permission event, not a "deleted" one.
+    const deniedDelete = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/wiki/pages/${pageId}`,
+      headers: { cookie: editorCookie, "x-csrf-token": editorToken },
+    });
+    expect(deniedDelete.statusCode).toBe(403);
+
+    const { sidCookie: adminSid } = await loginAs(app, "admin");
+    const { cookie: adminCookie, token: adminToken } = await obtainCsrf(app, adminSid);
+
+    const allowedDelete = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/wiki/pages/${pageId}`,
+      headers: { cookie: adminCookie, "x-csrf-token": adminToken },
+    });
+    expect(allowedDelete.statusCode).toBe(200);
+
+    const auditRes = await app.inject({
+      method: "GET",
+      url: "/api/v1/wiki/audit",
+      headers: { cookie: adminSid },
+    });
+    expect(auditRes.statusCode).toBe(200);
+    const { entries } = auditRes.json() as {
+      entries: {
+        actor: string;
+        action: string;
+        target: string;
+        outcome: string;
+        timestamp: number;
+      }[];
+    };
+
+    const pageTarget = "wiki:page:" + String(pageId);
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          actor: editorId,
+          action: "wiki:create",
+          target: pageTarget,
+          outcome: "created",
+        }),
+        expect.objectContaining({
+          actor: editorId,
+          action: "wiki:update",
+          target: pageTarget,
+          outcome: "updated",
+        }),
+        expect.objectContaining({
+          actor: editorId,
+          action: "wiki:admin",
+          target: pageTarget,
+          outcome: "denied",
+        }),
+        expect.objectContaining({
+          action: "wiki:delete",
+          target: pageTarget,
+          outcome: "deleted",
+        }),
+      ]),
+    );
 
     await apiGatewayModule.onDisable();
   });

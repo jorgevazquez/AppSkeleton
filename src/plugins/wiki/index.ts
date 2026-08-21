@@ -92,6 +92,7 @@
  * `./plugin.json` and `tests/plugins/wiki/manifest.test.ts`'s updated
  * assertion).
  */
+import type { AuditSink } from "../../core/audit.js";
 import type { PluginCapabilityAccess } from "../../core/broker.js";
 import { NotFoundError, RenderError, ValidationError } from "../../core/errors.js";
 import type { PluginLifecycleContext } from "../../core/loader.js";
@@ -99,7 +100,7 @@ import { isErr } from "../../core/types.js";
 import type { HttpRouteCapability } from "../api-gateway/index.js";
 import type { RenderTemplateCapability } from "../html-renderer/index.js";
 import type { RbacCheckCapability } from "../rbac/index.js";
-import { assertWikiAccess } from "./src/access.js";
+import { assertWikiAccessAudited, wikiAuditTarget } from "./src/access.js";
 import { createAuthorizedWikiStore, type AuthorizedWikiStore } from "./src/authorized-store.js";
 import { diffLines, renderDiffToHtml } from "./src/diff.js";
 import { renderMarkdownToHtml } from "./src/markdown.js";
@@ -126,6 +127,22 @@ const DB_QUERY_CAPABILITY_ID = "db:query";
 const RBAC_CHECK_CAPABILITY_ID = "rbac:check";
 /** Capability id `html-renderer` registers `compile()`/`render()` under (feature #52). */
 const RENDER_TEMPLATE_CAPABILITY_ID = "render:template";
+
+/**
+ * Backing state for this plugin's wiki-level audit trail (feature #98 —
+ * "Wiki-level audit log surfaced via the kernel audit trail"). Exported,
+ * mutable module state mirroring `rbac/index.ts`'s own `auditState`
+ * precedent (see that export's docs): {@link onInstall} copies the
+ * kernel's real sink in here the same way `loader.ts` already threads
+ * `PluginLifecycleContext.auditSink` into every plugin; every route
+ * handler below reads `auditState.sink` fresh (never memoized at
+ * `onEnable` time) when it builds this request's own `AuthorizedWikiStore`
+ * (`./src/authorized-store.ts`) or calls `assertWikiAccessAudited`
+ * directly. `sink` starts `undefined` — a request served before this hook
+ * has run (or a test that never goes through `loadPlugins()`) simply isn't
+ * audited, exactly like `rbac/index.ts`'s own optional sink.
+ */
+export const auditState: { sink: AuditSink | undefined } = { sink: undefined };
 
 /**
  * Resolve the calling user's identity from their session cookie (feature
@@ -178,7 +195,7 @@ function obtainWikiStores(capabilities: PluginCapabilityAccess): WikiRequestStor
   const rbacCheck = rbacObtained.value;
   const pages = createWikiPagesStore(dbQuery);
   const revisions = createWikiRevisionsStore(dbQuery);
-  const authorized = createAuthorizedWikiStore(pages, revisions, rbacCheck);
+  const authorized = createAuthorizedWikiStore(pages, revisions, rbacCheck, auditState.sink);
   return { authorized, dbQuery, rbacCheck };
 }
 
@@ -189,6 +206,71 @@ function obtainRenderTemplate(capabilities: PluginCapabilityAccess): RenderTempl
     throw obtained.error;
   }
   return obtained.value;
+}
+
+/**
+ * One entry as {@link resolveQueryableAuditSink}'s query surface hands
+ * back — a structural (not imported) type, matching `core/audit.ts`'s
+ * `AuditEvent` shape field-for-field without depending on that module's
+ * exported interface directly (this file only needs to read these five
+ * fields back out).
+ */
+interface WikiAuditEntryLike {
+  readonly actor: string;
+  readonly action: string;
+  readonly target: string;
+  readonly outcome: string;
+  readonly timestamp: number;
+  readonly details?: Record<string, unknown>;
+}
+
+/** A sink shaped like `core/audit.ts`'s `InMemoryAuditSink`/`MySqlAuditSink` — has a `query()` read-side, not just `AuditSink`'s bare `record()`. */
+interface QueryableWikiAuditSink {
+  query(filter?: { actor?: string }): readonly WikiAuditEntryLike[];
+}
+
+function hasQueryMethod(value: unknown): value is QueryableWikiAuditSink {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "query" in value &&
+    typeof (value as { query: unknown }).query === "function"
+  );
+}
+
+function hasCurrentDelegateMethod(value: unknown): value is { currentDelegate(): unknown } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "currentDelegate" in value &&
+    typeof (value as { currentDelegate: unknown }).currentDelegate === "function"
+  );
+}
+
+/**
+ * Resolve `auditState.sink` (which, in production, is actually a
+ * `SwitchableAuditSink` — see `server/index.ts`'s `bootstrapKernel` — even
+ * though `PluginLifecycleContext.auditSink`'s declared type is the
+ * narrower, `record()`-only `AuditSink`) down to something this route can
+ * actually call `query()` on, for the `GET /wiki/audit` admin view (feature
+ * #98, step 2). Duck-types rather than importing `SwitchableAuditSink`/
+ * `InMemoryAuditSink`/`MySqlAuditSink` directly, mirroring
+ * `server/index.ts`'s own `isAuditLogDbQuery`/`isHttpRouteCapability`
+ * "duck-type the shape, don't import the concrete type" precedent.
+ * Resolves to `undefined` (never throws) when no sink is wired at all, or
+ * the wired sink (its current delegate, if switchable) doesn't expose a
+ * `query()` method — the route below renders that as an empty list rather
+ * than failing the request, since "no audit trail available this boot" is
+ * not itself an error condition for an admin who's simply looking.
+ */
+function resolveQueryableAuditSink(
+  sink: AuditSink | undefined,
+): QueryableWikiAuditSink | undefined {
+  if (!sink) {
+    return undefined;
+  }
+  const candidate = hasCurrentDelegateMethod(sink) ? sink.currentDelegate() : sink;
+  return hasQueryMethod(candidate) ? candidate : undefined;
 }
 
 /** Parse a `:id`-shaped path parameter into a positive integer surrogate key, or throw {@link ValidationError}. Shared by every route with a page id (or, reused verbatim, a revision id) in its path/query. */
@@ -375,6 +457,35 @@ const NO_INPUT_QUERYSTRING_SCHEMA = {
   additionalProperties: false,
 };
 
+/** Querystring schema for the `GET /wiki/audit` admin route below (feature #98, step 2). */
+const AUDIT_QUERYSTRING_SCHEMA = {
+  type: "object",
+  properties: {
+    actor: { type: "string" },
+    limit: { type: "integer", minimum: 1, maximum: 200 },
+  },
+  additionalProperties: false,
+};
+
+const AUDIT_ENTRY_SCHEMA = {
+  type: "object",
+  properties: {
+    actor: { type: "string" },
+    action: { type: "string" },
+    target: { type: "string" },
+    outcome: { type: "string" },
+    timestamp: { type: "integer" },
+    details: { type: "object", additionalProperties: true },
+  },
+  required: ["actor", "action", "target", "outcome", "timestamp"],
+};
+
+const AUDIT_RESPONSE_SCHEMA = {
+  type: "object",
+  properties: { entries: { type: "array", items: AUDIT_ENTRY_SCHEMA } },
+  required: ["entries"],
+};
+
 // ---------------------------------------------------------------------------
 // Route registration (step 1 + step 2)
 // ---------------------------------------------------------------------------
@@ -544,7 +655,14 @@ function registerWikiRoutes(
       const query = request.query as { q: string; namespaceId?: string };
 
       const { dbQuery, rbacCheck } = obtainWikiStores(capabilities);
-      assertWikiAccess(rbacCheck, userId, "read", query.namespaceId);
+      assertWikiAccessAudited(
+        auditState.sink,
+        rbacCheck,
+        userId,
+        "read",
+        wikiAuditTarget(undefined, query.namespaceId),
+        query.namespaceId,
+      );
 
       const results = await searchWikiPages(dbQuery, query.q, query.namespaceId);
       return { query: query.q, results };
@@ -711,6 +829,63 @@ function registerWikiRoutes(
       return rendered.value;
     },
   });
+
+  // GET /wiki/audit — a simple admin view over the wiki-level slice of the
+  // kernel audit trail (feature #98, step 2: "provide a simple admin
+  // view/query listing recent wiki audit entries"). Requires "admin" on
+  // the global wiki resource (no namespace scoping — this lists activity
+  // across every namespace at once, so only a caller trusted with the
+  // wiki's own admin-level permission, not merely a namespace-scoped
+  // override, may use it). This check itself is audited too, via
+  // `assertWikiAccessAudited`, exactly like every other guarded operation.
+  registrar.registerRoute({
+    method: "GET",
+    path: "/wiki/audit",
+    schema: {
+      querystring: AUDIT_QUERYSTRING_SCHEMA,
+      response: { 200: AUDIT_RESPONSE_SCHEMA },
+    },
+    handler: async (request) => {
+      const userId = resolveUserId(request);
+      const { rbacCheck } = obtainWikiStores(capabilities);
+      assertWikiAccessAudited(auditState.sink, rbacCheck, userId, "admin", wikiAuditTarget());
+
+      const query = request.query as { actor?: string; limit?: number };
+      const sink = resolveQueryableAuditSink(auditState.sink);
+      const wikiEntries = (
+        sink?.query(query.actor !== undefined ? { actor: query.actor } : {}) ?? []
+      ).filter((entry) => entry.action.startsWith("wiki:"));
+      // Most-recent-first, capped at `limit` (default 50) — this is a
+      // "recent entries" admin view (step 2's own wording), not a full
+      // paginated export.
+      const limit = query.limit ?? 50;
+      const recent = wikiEntries.slice(-limit).reverse();
+
+      return {
+        entries: recent.map((entry) => ({
+          actor: entry.actor,
+          action: entry.action,
+          target: entry.target,
+          outcome: entry.outcome,
+          timestamp: entry.timestamp,
+          ...(entry.details !== undefined ? { details: entry.details } : {}),
+        })),
+      };
+    },
+  });
+}
+
+/**
+ * Copies the kernel's real audit sink (`loader.ts`'s
+ * `PluginLifecycleContext.auditSink`, feature #38) into {@link auditState}
+ * so every subsequent request's `AuthorizedWikiStore`/`assertWikiAccessAudited`
+ * call is audited (feature #98) — mirrors `rbac/index.ts`'s own
+ * `onInstall` precedent exactly. Runs before {@link onEnable} (`loader.ts`'s
+ * declare-before-hooks ordering), so `auditState.sink` is already set by
+ * the time any route this plugin registers could possibly be reached.
+ */
+export function onInstall(context: PluginLifecycleContext): void {
+  auditState.sink = context.auditSink;
 }
 
 /**
