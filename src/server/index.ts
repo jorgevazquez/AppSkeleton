@@ -67,6 +67,7 @@
  *     misconfigurations spanning more than one plugin, not a single
  *     plugin's own runtime failure, so there is nothing to isolate.
  */
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -214,6 +215,34 @@ export function formatFatalStartupError(error: unknown): string {
 }
 
 /**
+ * Every `plugin.json` declares its `entry_point` as a `.ts` source path
+ * (per `ENTRY_POINT_PATTERN` in manifest.ts) — correct when running the
+ * kernel straight from source (`tsx`, or vitest importing `.ts` directly),
+ * but that literal path no longer exists once `npm run build` compiles
+ * `src/` to `dist/` (feature #107's production image runs the compiled
+ * output, never `tsx`): `tsc` emits `index.js` next to the manifest, not
+ * `index.ts`. Resolve to whichever of the two actually exists on disk,
+ * preferring the manifest's literal `.ts` path so nothing changes for the
+ * from-source case; falls back to the sibling `.js` file only when the
+ * `.ts` source is absent, which is exactly the compiled-`dist/` case. If
+ * neither exists, return the literal path unchanged so the caller's
+ * existing `import()` failure handling (poison module + per-plugin
+ * isolation) reports the real, unmodified error.
+ */
+function resolveEntryPointPath(entryPointPath: string): string {
+  if (existsSync(entryPointPath)) {
+    return entryPointPath;
+  }
+  if (entryPointPath.endsWith(".ts")) {
+    const compiledPath = `${entryPointPath.slice(0, -".ts".length)}.js`;
+    if (existsSync(compiledPath)) {
+      return compiledPath;
+    }
+  }
+  return entryPointPath;
+}
+
+/**
  * Resolve one scanned, already-validated plugin manifest to a
  * {@link PluginDefinition} by dynamically importing its `entry_point`. A
  * plugin whose entry point cannot be imported (the common case today — no
@@ -228,7 +257,9 @@ async function resolvePluginDefinition(
   manifest: PluginManifest,
   logger: Logger,
 ): Promise<PluginDefinition> {
-  const entryPointPath = path.join(entry.directoryPath, manifest.entry_point);
+  const entryPointPath = resolveEntryPointPath(
+    path.join(entry.directoryPath, manifest.entry_point),
+  );
 
   let pluginModule: PluginModule;
   try {

@@ -18,6 +18,55 @@ npm run dev                 # start the dev server
 npm test                    # run the test suite
 ```
 
+## Production Docker image
+
+`Dockerfile` builds a minimal, production-only image: a `build` stage
+compiles TypeScript (`tsc`) with full dev+prod dependencies, then a
+`runtime` stage starts fresh from `node:20-alpine` with only production
+dependencies and the compiled `dist/` output — no compiler, no
+`devDependencies`, no source `.ts` files ship in the final image. The
+process runs as the image's built-in unprivileged `node` user, never root.
+
+Build the image:
+
+```bash
+docker build -t appskeleton .
+```
+
+Run it (needs at least `SESSION_SECRET`; everything else falls back to a
+safe default or, for `database-mysql`, degrades gracefully — see
+"Graceful degradation" in [`spec.md`](./spec.md) — if unset):
+
+```bash
+docker run -d --name appskeleton -p 3000:3000 \
+  -e SESSION_SECRET=<a long random string> \
+  -e DB_HOST=<your-mysql-host> \
+  -e DB_PASSWORD=<your-mysql-password> \
+  appskeleton
+```
+
+Or pass a whole `.env` file instead of individual `-e` flags:
+
+```bash
+docker run -d --name appskeleton -p 3000:3000 --env-file .env appskeleton
+```
+
+The image declares a container `HEALTHCHECK` against `GET /health`
+(api-gateway's built-in, DB-free route — feature #58), polled every 30s;
+`docker ps` and `docker inspect --format '{{.State.Health.Status}}'
+appskeleton` reflect it directly. Verify manually:
+
+```bash
+curl http://localhost:3000/health
+# {"status":"ok"}
+```
+
+To run against a real MySQL instance for local testing, start
+`docker compose up -d mysql` first (see [Quick start](#quick-start) above)
+and point `DB_HOST` at it — from inside another container on the same
+Docker network that's the `mysql` service name; from the host it's
+`127.0.0.1`.
+
 ## Code style
 
 Linting and formatting run automatically on staged files before every
