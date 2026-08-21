@@ -1078,7 +1078,7 @@
       "Write a test asserting an invalid target version is rejected and a valid one updates the file correctly"
     ],
     "depends_on": [74],
-    "passes": false
+    "passes": true
   },
   {
     "id": 85,
