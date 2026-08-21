@@ -145,6 +145,7 @@ describe.runIf(mysqlReachable)("wiki migrations — schema, indexes, and constra
       "0002_create_wiki_pages.ts",
       "0003_create_wiki_revisions.ts",
       "0004_add_wiki_pages_fulltext_index.ts",
+      "0005_create_wiki_attachments.ts",
     ]);
   });
 
@@ -153,21 +154,22 @@ describe.runIf(mysqlReachable)("wiki migrations — schema, indexes, and constra
     // this file's top doc comment for why leaving them applied would risk
     // breaking a later suite (or a second `npm test` run) that shares the
     // same global `schema_migrations` tracking table.
-    const result = await runMigrationsDown(db, files(), { pluginId: PLUGIN_ID, steps: 4 });
+    const result = await runMigrationsDown(db, files(), { pluginId: PLUGIN_ID, steps: 5 });
     expect(result.rolledBack).toEqual([
+      "0005_create_wiki_attachments.ts",
       "0004_add_wiki_pages_fulltext_index.ts",
       "0003_create_wiki_revisions.ts",
       "0002_create_wiki_pages.ts",
       "0001_create_wiki_namespaces.ts",
     ]);
-    for (const table of ["wiki_namespaces", "wiki_pages", "wiki_revisions"]) {
+    for (const table of ["wiki_namespaces", "wiki_pages", "wiki_revisions", "wiki_attachments"]) {
       expect(await tableExists(pool, table)).toBe(false);
     }
     await db.destroy();
   });
 
-  it("applies wiki_namespaces, wiki_pages, and wiki_revisions under the wiki_ table namespace", async () => {
-    for (const table of ["wiki_namespaces", "wiki_pages", "wiki_revisions"]) {
+  it("applies wiki_namespaces, wiki_pages, wiki_revisions, and wiki_attachments under the wiki_ table namespace", async () => {
+    for (const table of ["wiki_namespaces", "wiki_pages", "wiki_revisions", "wiki_attachments"]) {
       expect(await tableExists(pool, table)).toBe(true);
     }
 
@@ -202,6 +204,20 @@ describe.runIf(mysqlReachable)("wiki migrations — schema, indexes, and constra
     const pageIdxRows = rows.filter((row) => row.Key_name === "wiki_revisions_page_id_idx");
     expect(pageIdxRows.length).toBeGreaterThan(0);
     expect(pageIdxRows.some((row) => row.Column_name === "page_id")).toBe(true);
+  });
+
+  it("has a lookup index on wiki_attachments(page_id) and a UNIQUE index on storage_name (feature #97)", async () => {
+    const rows = await showIndex(pool, "wiki_attachments");
+
+    const pageIdxRows = rows.filter((row) => row.Key_name === "wiki_attachments_page_id_idx");
+    expect(pageIdxRows.length).toBeGreaterThan(0);
+    expect(pageIdxRows.some((row) => row.Column_name === "page_id")).toBe(true);
+
+    const storageNameIdxRows = rows.filter(
+      (row) => row.Key_name === "wiki_attachments_storage_name_uniq",
+    );
+    expect(storageNameIdxRows.map((row) => row.Column_name)).toEqual(["storage_name"]);
+    expect(storageNameIdxRows.every((row) => row.Non_unique === 0)).toBe(true);
   });
 
   it("enforces unique slug per namespace: a duplicate (namespace_id, slug) pair is rejected", async () => {

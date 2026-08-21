@@ -101,6 +101,12 @@ import type { HttpRouteCapability } from "../api-gateway/index.js";
 import type { RenderTemplateCapability } from "../html-renderer/index.js";
 import type { RbacCheckCapability } from "../rbac/index.js";
 import { assertWikiAccessAudited, wikiAuditTarget } from "./src/access.js";
+import { loadAttachmentStorageConfig } from "./src/attachment-storage-config.js";
+import { createWikiAttachmentsStore } from "./src/attachments.js";
+import {
+  createAuthorizedAttachmentsStore,
+  type AuthorizedAttachmentsStore,
+} from "./src/authorized-attachments.js";
 import { createAuthorizedWikiStore, type AuthorizedWikiStore } from "./src/authorized-store.js";
 import { diffLines, renderDiffToHtml } from "./src/diff.js";
 import { renderMarkdownToHtml } from "./src/markdown.js";
@@ -117,7 +123,7 @@ import {
   resolveUserId as resolveUserIdFromSession,
   type RequestWithCookies,
 } from "./src/session-identity.js";
-import type { Page, Revision } from "./src/types.js";
+import type { Attachment, Page, Revision } from "./src/types.js";
 
 /** Capability id `api-gateway` registers `registerRoute()`/`getApp()` under (feature #59). */
 const HTTP_ROUTE_CAPABILITY_ID = "http:route";
@@ -160,6 +166,7 @@ function resolveUserId(request: RequestWithCookies): string | undefined {
 /** Every store/capability handle a route handler needs, obtained fresh per request — see `obtainWikiStores`'s own doc comment for why. */
 interface WikiRequestStores {
   readonly authorized: AuthorizedWikiStore;
+  readonly attachments: AuthorizedAttachmentsStore;
   readonly dbQuery: WikiDbQueryCapability;
   readonly rbacCheck: RbacCheckCapability;
 }
@@ -196,7 +203,26 @@ function obtainWikiStores(capabilities: PluginCapabilityAccess): WikiRequestStor
   const pages = createWikiPagesStore(dbQuery);
   const revisions = createWikiRevisionsStore(dbQuery);
   const authorized = createAuthorizedWikiStore(pages, revisions, rbacCheck, auditState.sink);
-  return { authorized, dbQuery, rbacCheck };
+
+  // Feature #97 ("Attachments/file upload support for wiki pages"): the
+  // storage location/size-limit config is loaded fresh per request (never
+  // memoized at onEnable time), the same rationale `resolveUserId`'s own
+  // per-request `loadSessionIdentityConfig()` call already establishes —
+  // cheap (a small zod parse) and lets a test change `process.env` between
+  // requests without restarting the plugin.
+  const attachmentConfig = loadAttachmentStorageConfig();
+  const attachmentsStore = createWikiAttachmentsStore(dbQuery, {
+    dir: attachmentConfig.WIKI_ATTACHMENTS_DIR,
+    maxBytes: attachmentConfig.WIKI_ATTACHMENT_MAX_BYTES,
+  });
+  const attachments = createAuthorizedAttachmentsStore(
+    pages,
+    attachmentsStore,
+    rbacCheck,
+    auditState.sink,
+  );
+
+  return { authorized, attachments, dbQuery, rbacCheck };
 }
 
 /** Obtain `render:template` (feature #52), for the `get` route's Markdown-to-HTML rendering (feature #88) and the `diff` route's diff-to-HTML rendering (feature #90) — see `obtainWikiStores`'s docs for why this is fetched fresh per request rather than at `onEnable` time. */
@@ -306,6 +332,23 @@ function toRevisionJson(revision: Revision): Record<string, unknown> {
     content: revision.content,
     createdAt: revision.createdAt.toISOString(),
   };
+}
+
+/** JSON-safe projection of an {@link Attachment} (feature #97) — deliberately omits `storageName`, the randomized on-disk filename, which must never reach a client (see `./src/attachment-storage.ts`'s module docs). */
+function toAttachmentJson(attachment: Attachment): Record<string, unknown> {
+  return {
+    id: attachment.id,
+    pageId: attachment.pageId,
+    filename: attachment.filename,
+    contentType: attachment.contentType,
+    sizeBytes: attachment.sizeBytes,
+    createdAt: attachment.createdAt.toISOString(),
+  };
+}
+
+/** Strip characters that could break out of the quoted-string in a `Content-Disposition` response header (feature #97 step 2) — a `"` would end the quoted filename early, and a CR/LF could inject an extra header line. The attachment's declared filename is caller-supplied, so this is applied unconditionally before it ever reaches a header value. */
+function sanitizeContentDispositionFilename(filename: string): string {
+  return filename.replace(/["\r\n]/g, "");
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +485,61 @@ const DELETE_RESPONSE_SCHEMA = {
   type: "object",
   properties: { id: { type: "integer" }, deleted: { type: "boolean" } },
   required: ["id", "deleted"],
+};
+
+/** Path params for the two attachment routes nested under a page (feature #97) — `id` is the page id shared with every other page-scoped route above. */
+const ATTACHMENT_ID_PARAMS_SCHEMA = {
+  type: "object",
+  properties: { id: { type: "string" }, attachmentId: { type: "string" } },
+  required: ["id", "attachmentId"],
+  additionalProperties: false,
+};
+
+/** Upload request body (feature #97 step 1) — the file's bytes travel as a base64-encoded JSON field rather than `multipart/form-data`, since this codebase has no multipart-parsing dependency anywhere and every other route in this plugin already declares a plain JSON body schema; see `./src/attachment-storage-config.ts`'s module docs for the resulting interaction with api-gateway's own `REQUEST_BODY_LIMIT_BYTES`. */
+const UPLOAD_ATTACHMENT_BODY_SCHEMA = {
+  type: "object",
+  properties: {
+    filename: { type: "string", minLength: 1, maxLength: 255 },
+    contentType: { type: "string", minLength: 1 },
+    contentBase64: { type: "string", minLength: 1 },
+  },
+  required: ["filename", "contentType", "contentBase64"],
+  additionalProperties: false,
+};
+
+const ATTACHMENT_RESPONSE_PROPERTIES = {
+  id: { type: "integer" },
+  pageId: { type: "integer" },
+  filename: { type: "string" },
+  contentType: { type: "string" },
+  sizeBytes: { type: "integer" },
+  createdAt: { type: "string" },
+};
+const ATTACHMENT_RESPONSE_REQUIRED = [
+  "id",
+  "pageId",
+  "filename",
+  "contentType",
+  "sizeBytes",
+  "createdAt",
+];
+
+const ATTACHMENT_SCHEMA = {
+  type: "object",
+  properties: ATTACHMENT_RESPONSE_PROPERTIES,
+  required: ATTACHMENT_RESPONSE_REQUIRED,
+};
+
+const LIST_ATTACHMENTS_RESPONSE_SCHEMA = {
+  type: "object",
+  properties: { attachments: { type: "array", items: ATTACHMENT_SCHEMA } },
+  required: ["attachments"],
+};
+
+/** Response schema for the binary download route below (feature #97 step 2). Deliberately loose (just a description) — the handler returns a raw `Buffer`, which Fastify sends untouched regardless of any declared schema (see that route's own doc comment), so this exists only to satisfy `registerRoute()`'s "must declare a response schema" runtime backstop. */
+const BINARY_ATTACHMENT_RESPONSE_SCHEMA = {
+  description:
+    "Raw attachment binary data, served with the attachment's own content-type and a Content-Disposition header.",
 };
 
 /** Response schema for the two HTML form routes below (feature #96) — a plain string, matching api-gateway's own `GET /api/v1/docs` HTML route precedent (`../api-gateway/index.ts`'s `registerOpenApiDocumentationRoutes`). */
@@ -737,6 +835,116 @@ function registerWikiRoutes(
       }
 
       return { pageId, from: fromId, to: toId, lines, html: rendered.value };
+    },
+  });
+
+  // POST /wiki/pages/:id/attachments — upload an attachment (feature #97,
+  // step 1: "size-limited, content-type-validated file upload tied to a
+  // page, stored outside the webroot with randomized storage names").
+  // Requires "write" on the page's own namespace — uploading an attachment
+  // is a content mutation, the same class of operation as create/update
+  // (see `./src/authorized-attachments.ts`'s module doc for the full
+  // action-mapping rationale). Content-type/size validation happens inside
+  // `AuthorizedAttachmentsStore.uploadAttachment` (via `./src/
+  // attachments.ts`/`./src/attachment-storage.ts`), surfacing as an
+  // ordinary `ValidationError` (400) — never a bespoke error path here.
+  registrar.registerRoute({
+    method: "POST",
+    path: "/wiki/pages/:id/attachments",
+    schema: {
+      params: PAGE_ID_PARAMS_SCHEMA,
+      body: UPLOAD_ATTACHMENT_BODY_SCHEMA,
+      response: { 201: ATTACHMENT_SCHEMA },
+    },
+    handler: async (request, reply) => {
+      const userId = resolveUserId(request);
+      const params = request.params as { id: string };
+      const pageId = parsePositiveIntegerId(params.id, "page id");
+      const body = request.body as {
+        filename: string;
+        contentType: string;
+        contentBase64: string;
+      };
+
+      const { attachments } = obtainWikiStores(capabilities);
+      const attachment = await attachments.uploadAttachment(userId, pageId, {
+        filename: body.filename,
+        contentType: body.contentType,
+        data: Buffer.from(body.contentBase64, "base64"),
+      });
+      reply.status(201);
+      return toAttachmentJson(attachment);
+    },
+  });
+
+  // GET /wiki/pages/:id/attachments — list attachment metadata for a page
+  // (feature #97). Requires "read", scoped to the page's own namespace.
+  registrar.registerRoute({
+    method: "GET",
+    path: "/wiki/pages/:id/attachments",
+    schema: {
+      params: PAGE_ID_PARAMS_SCHEMA,
+      querystring: NO_INPUT_QUERYSTRING_SCHEMA,
+      response: { 200: LIST_ATTACHMENTS_RESPONSE_SCHEMA },
+    },
+    handler: async (request) => {
+      const userId = resolveUserId(request);
+      const params = request.params as { id: string };
+      const pageId = parsePositiveIntegerId(params.id, "page id");
+
+      const { attachments } = obtainWikiStores(capabilities);
+      const list = await attachments.listAttachments(userId, pageId);
+      return { attachments: list.map(toAttachmentJson) };
+    },
+  });
+
+  // GET /wiki/pages/:id/attachments/:attachmentId — serve an attachment's
+  // raw bytes (feature #97, step 2: "Serve attachments through an
+  // authorization-checked route ... respecting the page's permissions,
+  // never directly from a static directory"). Requires "read", scoped to
+  // the page's own namespace — the exact same check `getPageById`/`get`
+  // above enforce, so an attachment is never more or less visible than the
+  // page it's attached to. This is the *only* route that can ever produce
+  // an attachment's bytes: there is no static-file-serving route anywhere
+  // in this codebase (see `./src/attachment-storage.ts`'s module docs) —
+  // the blob's on-disk location is never exposed to a client.
+  //
+  // The handler returns a raw `Buffer`. Fastify's own `reply.js` sends any
+  // payload whose `.buffer` is an `ArrayBuffer` (true for every `Buffer`)
+  // immediately, before it would ever reach this route's declared response
+  // schema's JSON serializer — the same "payload type bypasses schema
+  // serialization" mechanism `../api-gateway/index.ts`'s own
+  // `/api/v1/docs` HTML route relies on for a `string` payload (see that
+  // route's doc comment). `reply.type(attachment.contentType)` is what
+  // makes the response reach the client with the attachment's own,
+  // validated content-type rather than Fastify's default.
+  registrar.registerRoute({
+    method: "GET",
+    path: "/wiki/pages/:id/attachments/:attachmentId",
+    schema: {
+      params: ATTACHMENT_ID_PARAMS_SCHEMA,
+      querystring: NO_INPUT_QUERYSTRING_SCHEMA,
+      response: { 200: BINARY_ATTACHMENT_RESPONSE_SCHEMA },
+    },
+    handler: async (request, reply) => {
+      const userId = resolveUserId(request);
+      const params = request.params as { id: string; attachmentId: string };
+      const pageId = parsePositiveIntegerId(params.id, "page id");
+      const attachmentId = parsePositiveIntegerId(params.attachmentId, "attachment id");
+
+      const { attachments } = obtainWikiStores(capabilities);
+      const { attachment, data } = await attachments.getAttachmentWithData(
+        userId,
+        pageId,
+        attachmentId,
+      );
+
+      reply.type(attachment.contentType);
+      reply.header(
+        "content-disposition",
+        `attachment; filename="${sanitizeContentDispositionFilename(attachment.filename)}"`,
+      );
+      return data;
     },
   });
 

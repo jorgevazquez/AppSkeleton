@@ -88,6 +88,34 @@ export interface PageTreeEntry {
 }
 
 /**
+ * A file attached to a {@link Page} (feature #97 — "Attachments/file
+ * upload support for wiki pages"). Mirrors
+ * `migrations/0005_create_wiki_attachments.ts`'s `wiki_attachments` schema
+ * 1:1. `storageName` is the randomized on-disk filename
+ * `attachment-storage.ts`'s `generateStorageName()` assigned at upload
+ * time — never derived from {@link filename}, which is display metadata
+ * only (see that module's own docs for why the two must stay independent).
+ */
+export interface Attachment {
+  /** Surrogate autoincrement primary key. */
+  readonly id: number;
+  /** The {@link Page.id} this attachment belongs to. */
+  readonly pageId: number;
+  /** Original, caller-supplied filename — display metadata only, never used to address the blob on disk. */
+  readonly filename: string;
+  /** The attachment's validated MIME type (`attachment-storage.ts`'s `ALLOWED_ATTACHMENT_CONTENT_TYPES`). */
+  readonly contentType: string;
+  /** Size of the stored file, in bytes. */
+  readonly sizeBytes: number;
+  /** The randomized on-disk filename under `WIKI_ATTACHMENTS_DIR` — never exposed to a client. */
+  readonly storageName: string;
+  /** The uploading caller's resolved user id, or `null` if unknown. */
+  readonly uploadedBy: string | null;
+  /** When this attachment was uploaded. */
+  readonly createdAt: Date;
+}
+
+/**
  * A namespace node within the nested page-tree / navigation-sidebar
  * structure `page-tree.ts`'s `buildNamespaceTree` assembles (feature #91).
  * Mirrors one `wiki_namespaces` row plus every page directly inside it;

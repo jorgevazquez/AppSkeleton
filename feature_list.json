@@ -1246,7 +1246,7 @@
       "Write a test asserting an oversized or disallowed-type upload is rejected, and a valid upload is retrievable only by an authorized user"
     ],
     "depends_on": [87, 71],
-    "passes": false
+    "passes": true
   },
   {
     "id": 98,
