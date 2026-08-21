@@ -223,3 +223,110 @@ describe("using a resolver function instead of a plain map", () => {
     expect(unwrap(result).render()).toBe("<body>custom</body>");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Composing with partials (feature #95 — "Wiki home page and navigation UI
+// rendered via html-renderer layouts"). Before this feature, `layout.ts` and
+// `partial.ts` were documented as "not composable in a single call" — a
+// template needing both a layout and a `{{> ...}}` tag had to pre-render the
+// partial separately and splice it in as audited raw output. These tests
+// exercise `compileWithLayout`'s new optional fourth argument instead.
+// ---------------------------------------------------------------------------
+
+describe("composing with partials (compileWithLayout's optional 4th argument)", () => {
+  const base = "<body>{{#block content}}default{{/block}}</body>";
+
+  it("resolves a {{> partial}} tag inside a block override, with no partials registry supplied via the old (options-only) call shape failing the same way it always has", () => {
+    const withoutPartials = compileWithLayout(
+      "{{extends base}}{{#block content}}{{> greeting name=who}}{{/block}}",
+      { base },
+    );
+    // Compiling still succeeds — an unresolvable {{> ...}} only ever fails at
+    // render time (matches compileTemplate's own long-standing behavior for
+    // a template compiled without a partial registry).
+    const compiled = unwrap(withoutPartials);
+    expect(() => compiled.render({ who: "Ada" })).toThrow(/partial registry/);
+  });
+
+  it("resolves a {{> partial}} tag inside a block override when a partials registry is supplied", () => {
+    const partials = { greeting: "Hello, {{name}}!" };
+    const compiled = unwrap(
+      compileWithLayout(
+        "{{extends base}}{{#block content}}{{> greeting name=who}}{{/block}}",
+        { base },
+        undefined,
+        partials,
+      ),
+    );
+    expect(compiled.render({ who: "Ada" })).toBe("<body>Hello, Ada!</body>");
+  });
+
+  it("resolves a {{> partial}} tag that lives in the base layout's own fixed structure (not inside a block at all)", () => {
+    const layoutWithPartial =
+      '<body><nav>{{> nav-item label="Home"}}</nav>{{#block content}}default{{/block}}</body>';
+    const partials = { "nav-item": '<a href="/">{{label}}</a>' };
+    const compiled = unwrap(
+      compileWithLayout("{{extends base}}", { base: layoutWithPartial }, undefined, partials),
+    );
+    expect(compiled.render()).toBe('<body><nav><a href="/">Home</a></nav>default</body>');
+  });
+
+  it("resolves a self-recursive partial referenced from inside a layout, matching compileWithPartials's own recursion support (a nested navigation tree of unknown depth)", () => {
+    const treePartial = [
+      "<span>{{label}}</span>",
+      "{{#if children}}<ul>{{#each children}}<li>{{> tree label=label children=children}}</li>{{/each}}</ul>{{/if}}",
+    ].join("");
+    const partials = { tree: treePartial };
+    const source =
+      "{{extends base}}{{#block content}}<div>{{> tree label=label children=children}}</div>{{/block}}";
+    const compiled = unwrap(compileWithLayout(source, { base }, undefined, partials));
+    const context = {
+      label: "root",
+      children: [
+        { label: "child-a", children: [] },
+        { label: "child-b", children: [{ label: "grandchild", children: [] }] },
+      ],
+    };
+    expect(compiled.render(context)).toBe(
+      "<body><div><span>root</span><ul>" +
+        "<li><span>child-a</span></li>" +
+        "<li><span>child-b</span><ul><li><span>grandchild</span></li></ul></li>" +
+        "</ul></div></body>",
+    );
+  });
+
+  it("still auto-escapes a partial's own interpolations when composed through a layout", () => {
+    const partials = { greeting: "<p>Hello, {{name}}!</p>" };
+    const compiled = unwrap(
+      compileWithLayout(
+        "{{extends base}}{{#block content}}{{> greeting name=who}}{{/block}}",
+        { base },
+        undefined,
+        partials,
+      ),
+    );
+    expect(compiled.render({ who: "<script>evil()</script>" })).toBe(
+      "<body><p>Hello, &lt;script&gt;evil()&lt;/script&gt;!</p></body>",
+    );
+  });
+
+  it("throws a RenderError for an unknown partial name even when a partials registry was supplied (just missing that name)", () => {
+    const compiled = unwrap(
+      compileWithLayout(
+        "{{extends base}}{{#block content}}{{> nope}}{{/block}}",
+        { base },
+        undefined,
+        { greeting: "hi" },
+      ),
+    );
+    expect(() => compiled.render()).toThrow(/Unknown partial "nope"/);
+  });
+
+  it("still supports a standalone (no {{extends}}) source containing a {{> ...}} tag when a partials registry is supplied", () => {
+    const partials = { greeting: "Hello, {{name}}!" };
+    const compiled = unwrap(
+      compileWithLayout("<p>{{> greeting name=who}}</p>", {}, undefined, partials),
+    );
+    expect(compiled.render({ who: "Ada" })).toBe("<p>Hello, Ada!</p>");
+  });
+});

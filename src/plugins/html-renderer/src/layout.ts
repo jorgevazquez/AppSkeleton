@@ -48,9 +48,22 @@
  * content. A child overriding a block that lands inside an `href="..."` in
  * the base layout gets URL-escaped even if the child itself never
  * mentions an `href` anywhere.
+ *
+ * ## Composing with partials (feature #95)
+ *
+ * `compileWithLayout`'s optional fourth argument, `partials`, resolves any
+ * `{{> name}}` tag reachable in the resolved tree (whether it lives in the
+ * base layout's own fixed structure, a block's default body, or a winning
+ * override) via the same lazy, cached {@link PartialResolver} `partial.ts`'s
+ * `compileWithPartials` builds — see `partial.ts`'s `createPartialResolver`,
+ * which both functions now share. This is what lets a shared layout embed a
+ * genuinely recursive component (e.g. a nested navigation tree of unknown
+ * depth) directly, rather than needing a caller to pre-render it to an HTML
+ * string and splice it in as audited raw output.
  */
 import { ValidationError } from "../../../core/errors.js";
 import { err, ok, type Result } from "../../../core/types.js";
+import { compileWithPartials, createPartialResolver, type PartialSource } from "./partial.js";
 import {
   compileResolvedNodes,
   compileTemplate,
@@ -61,6 +74,8 @@ import {
   type CompileOptions,
   type TemplateNode,
 } from "./template.js";
+
+export type { PartialSource } from "./partial.js";
 
 /** How `compileWithLayout` looks up a named layout's source: a plain map, or a resolver function. */
 export type LayoutSource =
@@ -140,11 +155,28 @@ function applyBlockOverrides(
  * layout structure with the winning block overrides spliced in — ends up
  * containing a `{{{raw ...}}}` tag anywhere, even one contributed by a
  * single level of the chain; see {@link requireRawAudit}.
+ *
+ * `partials` (feature #95 — "Wiki home page and navigation UI rendered via
+ * html-renderer layouts") is an optional partials registry, same shape as
+ * `partial.ts`'s `compileWithPartials` accepts, composing the two systems
+ * in one call: if the resolved tree — anywhere in the base layout's own
+ * fixed structure, a `{{#block}}`'s default body, or a winning override
+ * contributed by any level of the `{{extends}}` chain — contains a
+ * `{{> name}}` tag, it's resolved lazily against `partials` at render time
+ * via `partial.ts`'s shared `createPartialResolver` (identical lazy-
+ * resolution/caching/recursion-depth semantics `compileWithPartials` itself
+ * uses, including a self- or mutually-recursive partial working correctly
+ * — the standard way to render a recursive structure like a nested
+ * navigation tree). Omitted (the default, unchanged from before this
+ * parameter existed): any `{{> ...}}` tag reachable in the resolved tree
+ * throws a `RenderError` the first time it would render (see
+ * template.ts's "partial" compiler case).
  */
 export function compileWithLayout(
   source: string,
   layouts: LayoutSource,
   options?: CompileOptions,
+  partials?: PartialSource,
 ): Result<CompiledTemplate, ValidationError> {
   const rootResult = parseTemplate(source);
   if (!rootResult.ok) {
@@ -156,8 +188,11 @@ export function compileWithLayout(
   if (nextLayoutName === undefined) {
     // Nothing to resolve: `source` doesn't extend anything, so it's a normal template — or a
     // base layout, rendered directly with its blocks' own default content. Delegate to
-    // compileTemplate so this path gets exactly its validation/behavior, not a reimplementation.
-    return compileTemplate(source, options);
+    // compileTemplate (or, if a partials registry was supplied, compileWithPartials) so this path
+    // gets exactly that function's own validation/behavior, not a reimplementation.
+    return partials === undefined
+      ? compileTemplate(source, options)
+      : compileWithPartials(source, partials, options);
   }
 
   const overrides = new Map<string, readonly TemplateNode[]>();
@@ -227,5 +262,7 @@ export function compileWithLayout(
   if (!rawAuditResult.ok) {
     return rawAuditResult;
   }
-  return ok(compileResolvedNodes(resolved, options?.audit));
+  const resolvePartial =
+    partials === undefined ? undefined : createPartialResolver(partials, options);
+  return ok(compileResolvedNodes(resolved, options?.audit, resolvePartial));
 }

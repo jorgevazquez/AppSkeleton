@@ -38,17 +38,27 @@
  *
  * ## Scope of this feature
  *
- * Only what feature #52 depends on (features #46 and #47: variables/
- * conditionals/loops, auto-escaping) is exposed here. Layouts (#48),
- * partials (#49), and raw/audited output (#50) are already implemented in
- * `./src/template.ts`/`layout.ts`/`partial.ts` but deliberately not part of
- * this capability's surface yet — `compileTemplate`'s own `CompileOptions`
- * (the `audit` field) is still exposed pass-through, so a caller that
- * supplies one for a template containing `{{{raw ...}}}` gets the same
- * audited behavior `compileTemplate` already provides directly, but
- * `compileWithLayout`/`compileWithPartials` are not wired into
- * `render:template` here. Widening the capability surface to cover those is
- * a later feature's job, not this one's.
+ * What feature #52 depends on (features #46 and #47: variables/
+ * conditionals/loops, auto-escaping) is exposed here as `compile`/`render`.
+ * `compileTemplate`'s own `CompileOptions` (the `audit` field) is exposed
+ * pass-through on every entry point below, so a caller that supplies one
+ * for a template containing `{{{raw ...}}}` gets the same audited behavior
+ * `compileTemplate` already provides directly.
+ *
+ * Layouts (#48) and partials (#49) — `./src/layout.ts`'s `compileWithLayout`
+ * and `./src/partial.ts`'s `compileWithPartials` — were deliberately left
+ * out of this capability's surface when it was first built, per this
+ * module's own note at the time ("widening the capability surface to cover
+ * those is a later feature's job, not this one's"). Feature #95 ("Wiki home
+ * page and navigation UI rendered via html-renderer layouts") is that later
+ * feature: a plugin like `wiki` needs to compose a shared page layout with
+ * per-request dynamic data (a page's rendered content, a navigation tree of
+ * unknown depth) without importing html-renderer's internals directly (only
+ * a kernel-brokered capability may cross a plugin boundary — see
+ * `docs/plugin-conventions.md` section 5) — so `compileWithLayout` and
+ * `compileWithPartials` are now exposed here too, as thin pass-throughs
+ * with the exact same signatures/`Result` contract their underlying
+ * modules already have.
  */
 import type { ValidationError } from "../../core/errors.js";
 import { ok, type Result } from "../../core/types.js";
@@ -58,6 +68,11 @@ import {
   type NotFoundPageContext,
   type ServerErrorPageOptions,
 } from "./src/error-pages.js";
+import { compileWithLayout as compileWithLayoutImpl, type LayoutSource } from "./src/layout.js";
+import {
+  compileWithPartials as compileWithPartialsImpl,
+  type PartialSource,
+} from "./src/partial.js";
 import {
   compileTemplate,
   type CompileOptions,
@@ -70,6 +85,12 @@ import {
 // calls from this one module, the same way api-gateway re-exports its own
 // route-capability types from `index.ts`.
 export type { CompileOptions, CompiledTemplate, TemplateContext } from "./src/template.js";
+// Re-exported for the same reason (feature #95) — a consumer building a
+// `compileWithLayout`/`compileWithPartials` call needs these two registry
+// shapes without reaching into `./src/layout.js`/`./src/partial.js`
+// directly.
+export type { LayoutSource } from "./src/layout.js";
+export type { PartialSource } from "./src/partial.js";
 
 // Re-exported so a consuming plugin can type-only import everything it needs
 // for `capabilities.obtain<ErrorPagesCapability>("html:error-pages")` calls
@@ -98,6 +119,37 @@ export interface RenderTemplateCapability {
     context?: TemplateContext,
     options?: CompileOptions,
   ): Result<string, ValidationError>;
+  /**
+   * Compile `source` — which may contain `{{extends name}}` — through its
+   * full layout chain, resolving named layouts via `layouts`. Thin pass-
+   * through to `./src/layout.js`'s `compileWithLayout` (feature #48); see
+   * that function's own doc comment for the full resolution algorithm.
+   * `partials` (feature #95's own addition to `compileWithLayout` itself)
+   * additionally resolves any `{{> name}}` tag reachable in the resolved
+   * tree — omit it for a layout chain with no partials of its own, exactly
+   * like calling `compileWithLayout` directly.
+   */
+  compileWithLayout(
+    source: string,
+    layouts: LayoutSource,
+    options?: CompileOptions,
+    partials?: PartialSource,
+  ): Result<CompiledTemplate, ValidationError>;
+  /**
+   * Compile `source` — which may contain `{{> name ...}}` tags but not
+   * `{{extends}}` — resolving named partials via `partials`. Thin pass-
+   * through to `./src/partial.js`'s `compileWithPartials` (feature #49);
+   * see that function's own doc comment for the full resolution/error
+   * contract (an unknown partial name, a referenced partial's own parse
+   * error, or exceeding the max recursion depth throws a `RenderError`
+   * from the returned `CompiledTemplate.render()`, never a `Result` — only
+   * a malformed `source` itself is a `Result` error here).
+   */
+  compileWithPartials(
+    source: string,
+    partials: PartialSource,
+    options?: CompileOptions,
+  ): Result<CompiledTemplate, ValidationError>;
 }
 
 function compile(
@@ -117,6 +169,23 @@ function render(
     return compiled;
   }
   return ok(compiled.value.render(context));
+}
+
+function compileWithLayout(
+  source: string,
+  layouts: LayoutSource,
+  options?: CompileOptions,
+  partials?: PartialSource,
+): Result<CompiledTemplate, ValidationError> {
+  return compileWithLayoutImpl(source, layouts, options, partials);
+}
+
+function compileWithPartials(
+  source: string,
+  partials: PartialSource,
+  options?: CompileOptions,
+): Result<CompiledTemplate, ValidationError> {
+  return compileWithPartialsImpl(source, partials, options);
 }
 
 /**
@@ -142,7 +211,12 @@ export interface ErrorPagesCapability {
  * currently exports no lifecycle hooks at all.
  */
 export const provides: Readonly<Record<string, unknown>> = {
-  "render:template": { compile, render } satisfies RenderTemplateCapability,
+  "render:template": {
+    compile,
+    render,
+    compileWithLayout,
+    compileWithPartials,
+  } satisfies RenderTemplateCapability,
   "html:error-pages": {
     renderNotFoundPage,
     renderServerErrorPage,

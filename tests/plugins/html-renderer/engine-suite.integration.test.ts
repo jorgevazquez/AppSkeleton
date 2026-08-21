@@ -19,10 +19,14 @@
  * composition are proven to observe the exact same underlying source and
  * the exact same dev-mode invalidation behavior — while a loop of
  * parameterized partials (feature #49) is pre-rendered and spliced into the
- * composed layout as audited raw output (feature #50), since
- * `compileWithLayout` and `compileWithPartials` are not composable in a
- * single call (see layout.ts/partial.ts's own module docs) — pre-render,
- * then splice, is the realistic way an app ties the two together today.
+ * composed layout as audited raw output (feature #50) — the pre-render,
+ * then splice approach an app already needed before feature #95 taught
+ * `compileWithLayout` to accept an optional `partials` argument of its own
+ * (see layout.ts/partial.ts's own module docs for that direct-composition
+ * path); kept here as a still-valid alternative for a caller that would
+ * rather pre-render a partial to raw HTML once and reuse it across many
+ * layouts than wire the same partials registry into every
+ * `compileWithLayout` call.
  */
 import { describe, expect, it, vi } from "vitest";
 import { createInMemoryAuditSink } from "../../../src/core/audit.js";

@@ -64,8 +64,7 @@ describe("render:template — integration (feature #52)", () => {
 
     const pageModule: PluginModule = {
       onEnable(context) {
-        const obtained =
-          context.capabilities.obtain<RenderTemplateCapability>("render:template");
+        const obtained = context.capabilities.obtain<RenderTemplateCapability>("render:template");
         if (isErr(obtained)) {
           throw obtained.error;
         }
@@ -115,6 +114,73 @@ describe("render:template — integration (feature #52)", () => {
     expect(results.loud).toBe("<p>HELLO</p>");
   });
 
+  it("a fixture plugin composes a shared layout with a partials registry through compileWithLayout/compileWithPartials (feature #95)", async () => {
+    const results: Record<string, string> = {};
+
+    const pageManifest = manifest("page-plugin", {
+      dependsOn: { "html-renderer": "^1.0.0" },
+      requires: ["render:template"],
+    });
+
+    const pageModule: PluginModule = {
+      onEnable(context) {
+        const obtained = context.capabilities.obtain<RenderTemplateCapability>("render:template");
+        if (isErr(obtained)) {
+          throw obtained.error;
+        }
+        const { compileWithLayout, compileWithPartials } = obtained.value;
+
+        // compileWithLayout alone (feature #48, already exposed before #95) still works.
+        const layouts = { base: "<body>{{#block content}}default{{/block}}</body>" };
+        const layoutOnly = compileWithLayout(
+          "{{extends base}}{{#block content}}Hi, {{name}}!{{/block}}",
+          layouts,
+        );
+        if (isErr(layoutOnly)) {
+          throw layoutOnly.error;
+        }
+        results.layoutOnly = layoutOnly.value.render({ name: "Ada" });
+
+        // compileWithPartials alone (feature #49, already exposed before #95) still works.
+        const partials = { greeting: "Hello, {{name}}!" };
+        const partialsOnly = compileWithPartials("<p>{{> greeting name=who}}</p>", partials);
+        if (isErr(partialsOnly)) {
+          throw partialsOnly.error;
+        }
+        results.partialsOnly = partialsOnly.value.render({ who: "Bob" });
+
+        // compileWithLayout's new optional 4th argument composes both in one call (feature #95).
+        const composed = compileWithLayout(
+          "{{extends base}}{{#block content}}{{> greeting name=who}}{{/block}}",
+          layouts,
+          undefined,
+          partials,
+        );
+        if (isErr(composed)) {
+          throw composed.error;
+        }
+        results.composed = composed.value.render({ who: "Carol" });
+      },
+    };
+
+    const definitions: PluginDefinition[] = [
+      { manifest: HTML_RENDERER_MANIFEST, module: htmlRendererModule },
+      { manifest: pageManifest, module: pageModule },
+    ];
+
+    const broker = createCapabilityBroker();
+    const loadResult = await loadPlugins(definitions, broker);
+    expect(isOk(loadResult)).toBe(true);
+    if (!isOk(loadResult)) {
+      return;
+    }
+    expect(loadResult.value.failed).toEqual([]);
+
+    expect(results.layoutOnly).toBe("<body>Hi, Ada!</body>");
+    expect(results.partialsOnly).toBe("<p>Hello, Bob!</p>");
+    expect(results.composed).toBe("<body>Hello, Carol!</body>");
+  });
+
   it("a malformed template surfaces as a typed Result error through the capability, not a thrown exception", async () => {
     const brokenManifest = manifest("broken-consumer", {
       dependsOn: { "html-renderer": "^1.0.0" },
@@ -125,8 +191,7 @@ describe("render:template — integration (feature #52)", () => {
 
     const brokenModule: PluginModule = {
       onEnable(context) {
-        const obtained =
-          context.capabilities.obtain<RenderTemplateCapability>("render:template");
+        const obtained = context.capabilities.obtain<RenderTemplateCapability>("render:template");
         if (isErr(obtained)) {
           throw obtained.error;
         }
@@ -158,8 +223,7 @@ describe("render:template — integration (feature #52)", () => {
 
     const undeclaredModule: PluginModule = {
       onEnable(context) {
-        const obtained =
-          context.capabilities.obtain<RenderTemplateCapability>("render:template");
+        const obtained = context.capabilities.obtain<RenderTemplateCapability>("render:template");
         if (isErr(obtained)) {
           throw obtained.error;
         }
