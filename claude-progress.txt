@@ -2135,3 +2135,5 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Gotcha for future html-renderer template authors: the template tokenizer's {{...}} regex only requires literal adjacent double-braces to fire (no whitespace tolerance), so an inline <script> block's own JS syntax can safely contain '}}' or '{{' style sequences as long as they're never two open (or two close) braces with nothing between them -- verified by hand and by the passing render/escaping tests, but worth flagging since a future template with denser/minified JS could accidentally trip the tokenizer.
 - Did not build a GET /wiki/pages/:id HTML 'view' page (only the JSON API from feature #94 renders a page's content) -- out of scope for #96's own three steps, which only ask for create/edit forms; a create's successful redirect target is the edit form itself (which already shows the saved title/content), not a dedicated view page.
 - No new capability declared in plugin.json -- page-form.ts only uses render:template, already required.
+
+[2026-08-20 17:59] Auto-run finished: +3 features, now 104/120 (86.7%)
