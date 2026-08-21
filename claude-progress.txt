@@ -2247,3 +2247,30 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Known flaky/pre-existing: tests/plugins/database-mysql/migrator.integration.test.ts and its integration.test.ts sibling fail in this sandbox even fully isolated from every other suite (fileParallelism is already false in vitest.config.ts, and schema_migrations has no leftover stale rows) — a real pre-existing environment issue, not something feature #100 introduced or should fix.
 
 [2026-08-21 14:21] Auto-run finished: +3 features, now 110/120 (91.7%)
+---
+
+## 2026-08-21 15:06 — Feature #97: Attachments/file upload support for wiki pages
+
+### What was done:
+- Added migration 0005_create_wiki_attachments.ts (wiki_attachments: page_id, filename, content_type, size_bytes, storage_name, uploaded_by, created_at; page_id lookup index + UNIQUE storage_name index).
+- Added src/plugins/wiki/src/attachment-storage.ts: ALLOWED_ATTACHMENT_CONTENT_TYPES fixed allowlist, assertAttachmentUploadAllowed (content-type + size validation before any I/O), generateStorageName (randomBytes(24).toString('hex')), writeAttachmentFile/readAttachmentFile/deleteAttachmentFile (fs, 0600 mode, path-traversal-proof via a strict storage-name regex re-checked on every call).
+- Added src/plugins/wiki/src/attachment-storage-config.ts: zod-validated WIKI_ATTACHMENTS_DIR (default <cwd>/var/wiki-attachments) / WIKI_ATTACHMENT_MAX_BYTES (default 5 MiB) via core/config.ts's loadConfig().
+- Added src/plugins/wiki/src/attachments.ts: WikiAttachmentsStore (createAttachment/getAttachment/listAttachments/readAttachmentData) over db:query, writes the blob to disk before inserting the metadata row and rolls the blob back off disk if the insert fails.
+- Added src/plugins/wiki/src/authorized-attachments.ts: AuthorizedAttachmentsStore, mirroring authorized-store.ts's pattern — looks the owning page up first, then assertWikiAccessAudited (write for upload, read for list/download) before ever touching the store, so an unauthorized caller gets the same 401/403 whether or not the page/attachment exists.
+- Wired 3 new routes into src/plugins/wiki/index.ts: POST /wiki/pages/:id/attachments (upload, write), GET /wiki/pages/:id/attachments (list, read), GET /wiki/pages/:id/attachments/:attachmentId (download raw bytes, read) — download returns a raw Buffer (bypasses Fastify's JSON schema serializer per reply.js's own payload.buffer check), setting Content-Type to the attachment's validated type and a sanitized Content-Disposition header.
+- Added Attachment type to src/plugins/wiki/src/types.ts.
+- Updated tests/plugins/wiki/migrations.integration.test.ts for the 5th migration.
+- Added .env.example entries and .gitignore'd /var/ (the default attachments directory).
+
+### Testing:
+- New unit tests tests/plugins/wiki/attachment-storage.test.ts (25 assertions across allowlist/size validation, storage-name format/uniqueness, disk round-trip, 0600 mode, delete-tolerates-ENOENT, and path-traversal rejection on write/read/delete) and attachment-storage-config.test.ts (defaults, env overrides, ConfigError on malformed values) — all passing, no MySQL needed.
+- New integration suite tests/plugins/wiki/attachments.integration.test.ts (6 tests, real api-gateway+rbac+html-renderer+wiki plugins through the real broker/loader, real MySQL, app.inject() HTTP dispatch): disallowed content-type rejected 400 (never persisted); oversized upload rejected 400 (WIKI_ATTACHMENT_MAX_BYTES overridden to 64 bytes via env for the test, well under api-gateway's own default 1 MiB body limit so the 400 isn't masked by a generic 413); viewer (read-only) upload rejected 403; valid upload -> download round-trips the exact bytes/content-type/filename and never exposes storageName; unauthenticated download rejected 401; nonexistent attachment on a real page returns 404.
+- npx tsc --noEmit, npm run build, npm run lint, npx prettier --check: all clean.
+- npx vitest run tests/plugins/wiki/: 254 passed (only the pre-existing migrations.integration.test.ts failure, confirmed via git stash to reproduce identically on the untouched tree — a documented shared-schema_migrations-table race across concurrent worktree MySQL containers, not a regression).
+- Full npx vitest run: 1730 passed / 11 failed / 8 skipped — same 4 pre-existing failing files (database-mysql/integration + migrator.integration, wiki/migrations.integration, core/audit-persistence.integration) documented at length by many prior sessions in this file, reproduced identically on the untouched tree.
+
+### Notes:
+- No multipart/form-data dependency exists anywhere in this codebase, so the upload route accepts a base64-encoded JSON body field (filename/contentType/contentBase64) rather than multipart — consistent with every other route in this plugin already declaring a plain JSON schema. Documented the resulting interaction with api-gateway's global REQUEST_BODY_LIMIT_BYTES (base64 inflates ~4/3) in attachment-storage-config.ts's module doc for whoever raises WIKI_ATTACHMENT_MAX_BYTES later.
+- This codebase has no static-file-serving route anywhere (confirmed by grep) — the download route is the only possible path to an attachment's bytes; storage names are cryptographically random (192 bits) and never derived from the caller's filename, which is stored purely as display metadata.
+- Action mapping follows access.ts's existing wiki:read/write/admin grammar: upload=write, list/download=read (an attachment is exactly as sensitive as the page it's attached to) — no new permission or capability was introduced.
+- Binary download works by returning a raw Buffer from the handler: Fastify's reply.js sends any payload whose .buffer is an ArrayBuffer immediately, bypassing the declared response schema's JSON serializer entirely (same bypass mechanism api-gateway's own HTML/JSON string routes already rely on for non-JSON payloads).
