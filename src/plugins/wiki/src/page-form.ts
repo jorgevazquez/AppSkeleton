@@ -224,6 +224,22 @@ const PAGE_FORM_SCRIPT = [
 
 // ---------------------------------------------------------------------------
 // The page template itself.
+//
+// Accessibility pass (feature #102): the form's own heading (`<h1>`) is the
+// only heading on this standalone document — this template is never
+// composed through `page-templates.ts`'s `WIKI_LAYOUT`, so there is no
+// second, site-brand heading to collide with. `#form-status`/`#form-errors`
+// are both live regions (`aria-live`, `role="status"`/`role="alert"`) so the
+// inline script's own DOM writes (`showErrors`/`status.textContent`) are
+// announced to a screen reader without a page reload — `role="alert"` is
+// already implicitly `aria-live="assertive"`, the explicit attribute below
+// is just documentation-by-markup of that fact, mirroring `role="status"`'s
+// own explicit `aria-live="polite"` pairing. Every input already had its
+// `<label for>` correctly paired with the field's `id` (step 1 found no
+// defect there); `<main>` adds a single landmark around the form so
+// keyboard/screen-reader users can jump straight past `<title>`/`<head>` to
+// the page's one real region without any extra navigation chrome to skip
+// (unlike the wiki-layout pages, this document has no sidebar).
 // ---------------------------------------------------------------------------
 
 const PAGE_FORM_TEMPLATE_SOURCE = [
@@ -234,9 +250,10 @@ const PAGE_FORM_TEMPLATE_SOURCE = [
   "<title>{{#if isEdit}}Edit Page{{else}}New Page{{/if}}</title>",
   "</head>",
   "<body>",
+  '<main id="page-form-main">',
   "<h1>{{#if isEdit}}Edit Page{{else}}New Page{{/if}}</h1>",
-  '<div id="form-status" class="form-status"></div>',
-  '<div id="form-errors" class="form-errors" role="alert"></div>',
+  '<div id="form-status" class="form-status" role="status" aria-live="polite"></div>',
+  '<div id="form-errors" class="form-errors" role="alert" aria-live="assertive"></div>',
   '<form id="page-form" data-action="{{actionPath}}" data-method="{{actionMethod}}">',
   "{{#if isEdit}}",
   '<input type="hidden" name="pageId" value="{{pageId}}" />',
@@ -254,6 +271,7 @@ const PAGE_FORM_TEMPLATE_SOURCE = [
   '<textarea id="content" name="content" rows="20" cols="80" required>{{content}}</textarea></p>',
   '<button type="submit">{{#if isEdit}}Save{{else}}Create{{/if}}</button>',
   "</form>",
+  "</main>",
   `<script>${PAGE_FORM_SCRIPT}</script>`,
   "</body>",
   "</html>",

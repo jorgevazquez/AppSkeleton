@@ -78,18 +78,46 @@ const LAYOUT_NAME = "wiki-layout";
 /** Name the navigation sidebar's recursive partial is registered under, and calls itself under. */
 const NAV_PARTIAL_NAME = "wiki-nav-tree";
 
+/**
+ * Accessibility pass (feature #102): fixed, literal CSS text only — no
+ * `{{variable}}` interpolation anywhere inside it, so it needs no escaper
+ * (mirrors `PAGE_FORM_SCRIPT`'s own "fixed literal source, nothing
+ * user-controlled spliced in" precedent, just for a `<style>` block instead
+ * of a `<script>` one). Two rules:
+ *
+ *   - `.wiki-skip-link` is the standard "visually hidden until focused"
+ *     skip-navigation pattern: off-screen by default, snapped into view
+ *     with a clearly visible outline the instant it receives keyboard
+ *     focus, so a keyboard user never has to tab through the entire
+ *     navigation sidebar just to reach `{{#block content}}` (step 1's
+ *     "keyboard navigability" + step 2's "focus states").
+ *   - `:focus-visible` on the sidebar's own links reinforces the same
+ *     "focus must be visible" requirement for every link the recursive
+ *     `wiki-nav-tree` partial renders, without changing mouse-click
+ *     appearance (`:focus-visible` only matches keyboard/programmatic
+ *     focus, not a mouse click).
+ */
+const WIKI_LAYOUT_STYLE = [
+  ".wiki-skip-link{position:absolute;left:-9999px;top:0;padding:0.5em 1em;",
+  "background:#000;color:#fff;z-index:100;}",
+  ".wiki-skip-link:focus{left:0;outline:3px solid #005fcc;outline-offset:2px;}",
+  ".wiki-sidebar a:focus-visible,.wiki-content a:focus-visible{outline:3px solid #005fcc;outline-offset:2px;}",
+].join("");
+
 const WIKI_LAYOUT = [
   "<!doctype html>",
   '<html lang="en">',
   "<head>",
   '<meta charset="utf-8" />',
   "<title>{{#block title}}Wiki{{/block}}</title>",
+  `<style>${WIKI_LAYOUT_STYLE}</style>`,
   "</head>",
   "<body>",
-  '<header class="wiki-header"><h1 class="wiki-title"><a href="/wiki">Wiki</a></h1></header>',
+  '<a class="wiki-skip-link" href="#wiki-main-content">Skip to main content</a>',
+  '<header class="wiki-header"><p class="wiki-title"><a href="/wiki">Wiki</a></p></header>',
   '<div class="wiki-layout">',
   `<nav class="wiki-sidebar" aria-label="Wiki navigation">{{> ${NAV_PARTIAL_NAME} nodes=navTree}}</nav>`,
-  '<main class="wiki-content">{{#block content}}{{/block}}</main>',
+  '<main id="wiki-main-content" class="wiki-content" tabindex="-1">{{#block content}}{{/block}}</main>',
   "</div>",
   "</body>",
   "</html>",

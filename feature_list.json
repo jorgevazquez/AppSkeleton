@@ -1310,7 +1310,7 @@
       "Write a lightweight automated check (e.g. axe-core against rendered HTML) as part of the test suite"
     ],
     "depends_on": [95, 96],
-    "passes": false
+    "passes": true
   },
   {
     "id": 103,
