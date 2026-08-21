@@ -282,9 +282,31 @@ def _create_worktree(project_dir: Path, feature_id: int) -> Path | None:
 
 
 def _remove_worktree(project_dir: Path, feature_id: int):
-    """Remove worktree and its branch."""
+    """Remove worktree and its branch.
+
+    Tears down the worktree's own docker-compose stack first (each worktree
+    is a separate directory, so `docker compose` gives it its own project
+    name and its own `mysql` container/volume). Without this, a feature
+    session that starts MySQL via init.sh and then gets killed (timeout,
+    Ctrl-C, circuit breaker) leaks that container indefinitely — it doesn't
+    show up in `git worktree list` or `git status`, so it silently survives
+    `git worktree remove` and keeps accumulating across runs. A stray
+    container from an old worktree can also squat on host port 3306 ahead
+    of the main repo's own `docker compose up -d mysql`, which then makes
+    unrelated integration tests fail against the wrong database — this is
+    the real root cause behind a lot of "pre-existing MySQL flakiness"
+    noted throughout claude-progress.txt.
+    """
     wt_path = project_dir / ".worktrees" / f"feature-{feature_id}"
     branch = f"feature-{feature_id}"
+    if wt_path.exists() and (wt_path / "docker-compose.yml").exists():
+        try:
+            subprocess.run(
+                ["docker", "compose", "down", "-v"],
+                cwd=str(wt_path), capture_output=True, text=True, timeout=30,
+            )
+        except Exception:
+            pass
     try:
         subprocess.run(
             ["git", "worktree", "remove", str(wt_path), "--force"],
