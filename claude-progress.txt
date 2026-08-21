@@ -2195,3 +2195,21 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Only list/create/update roles + assign/revoke permissions were added (matching the feature's exact wording) — deleteRole and assignRoleToUser/revokeRoleFromUser already exist on RbacManagementApi from feature #36 but were deliberately left without an HTTP route here since the feature description didn't ask for role deletion or user-role assignment routes.
 
 [2026-08-20 20:14] Auto-run finished: +3 features, now 107/120 (89.2%)
+
+---
+
+## 2026-08-21 14:19 — Feature #84: Plugin manifest version bump helper
+
+### What was done:
+- Added src/plugins/plugin-builder/src/bump-version.ts exporting bumpPluginVersion({ manifestPath, targetVersion }): reads and JSON-parses plugin.json, re-validates the current manifest through the kernel's real validateManifest() (core/manifest.ts), builds a candidate manifest with version replaced by targetVersion and re-validates that too (so a non-canonical-semver target is rejected via the kernel's own semver regex rather than a duplicated one), then requires semver.gt(target, current) to be true before writing anything — a same-version or downgrade target is rejected. Only writes to disk (via plugin-templates.ts's renderPluginManifestJson, matching every other generated plugin.json's exact pretty-printed/trailing-newline format) once both checks pass; on any failure the file is left byte-for-byte untouched. Returns the existing Result<T, ValidationError> convention (never throws for expected/recoverable failures).
+
+### Testing:
+- New tests/plugins/plugin-builder/bump-version.test.ts (4 tests, no MySQL): rejects a non-semver target and leaves the file untouched; rejects a target equal to or lower than the current version (same-version and downgrade cases) and leaves the file untouched; accepts a valid greater target, updates version on disk, re-validates the written manifest via the kernel's validateManifest(), and confirms every other field (id, entry_point, ...) is preserved verbatim; confirms the written file keeps the repo's pretty-printed/trailing-newline plugin.json convention.
+- npx vitest run tests/plugins/plugin-builder/bump-version.test.ts: 4/4 passing.
+- npx tsc --noEmit: clean. npm run lint (eslint): clean. npx prettier --check on both new files: clean. npm run build: clean.
+- Full npx vitest run: only pre-existing tests/plugins/database-mysql/* and tests/core/audit-persistence.integration.test.ts MySQL integration failures present (stateful docker-compose schema_migrations drift already documented by the prior session in this file, unrelated to this feature — bump-version.ts touches only plugin.json on the local filesystem, no MySQL). git status confirmed only the two new files were added, nothing else touched.
+
+### Notes:
+- Deliberately reused validateManifest() itself to check the target version's semver format (candidate = {...current, version: targetVersion} then validateManifest(candidate)) instead of re-exporting/duplicating manifest.ts's private SEMVER_VERSION_PATTERN — same drift-avoidance rationale generate-plugin.ts and manifest-json-schema.ts already document for this codebase.
+- 'Safely bumps' interpreted as: (a) shape/format-valid per the kernel's own validator, and (b) strictly forward-moving per semver.gt — a bump to the same version or a lower one is rejected as a validation error, not silently treated as a no-op.
+- Scoped to the programmatic utility + test only, per feature #84's exact two steps (no CLI subcommand or npm script wired) — create-plugin's CLI (feature #76) is a separate, already-shipped precedent this could follow later if a future feature asks for it.
