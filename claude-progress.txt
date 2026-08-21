@@ -2426,3 +2426,5 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - No MySQL/server dependency needed for this benchmark, unlike load-test.ts (feature 110) — it measures pure in-process kernel primitives, so 'under load' is defined here as sustained call volume (hundreds of thousands of calls) rather than autocannon-style concurrent connections, which don't apply to a synchronous in-process function call with no I/O to overlap.
 - Broker scenarios test both function-shaped and object-shaped capability handles since wrapHandle() in broker.ts has two different Proxy trap paths (apply vs get) with different overhead profiles.
 - The pre-existing migrator.integration.test.ts failures are unrelated to this feature (they fail identically on a clean checkout via ./init.sh, before any change) — did not attempt to fix them per the instruction to only work on feature 119.
+
+[2026-08-21 16:34] Auto-run finished: +3 features, now 119/120 (99.2%)
