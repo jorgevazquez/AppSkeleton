@@ -6,6 +6,10 @@ helper scripts (feature #28). It exists for the same reason
 coding agent_ needing to back up or restore the database knows the
 process without having to reverse-engineer it from the scripts.
 
+For the incident-response version of this document — when to restore,
+in what order, and a recovery-time checklist to work through during an
+actual outage — see [`docs/disaster-recovery.md`](./disaster-recovery.md).
+
 **Source of truth.** Nothing below is a hand-copied description — it
 documents `scripts/backup.sh` and `scripts/restore.sh` (and their shared
 helper, `scripts/lib/env.sh`) exactly as implemented. If either script

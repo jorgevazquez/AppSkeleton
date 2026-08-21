@@ -94,7 +94,9 @@ npm run format:check  # prettier --check
 See [`docs/operator-guide.md`](./docs/operator-guide.md) for environment
 configuration, how to add a new plugin to a running deployment, and how
 capability grants (the kernel's inter-plugin permission mechanism) are
-actually managed.
+actually managed. See [`docs/disaster-recovery.md`](./docs/disaster-recovery.md)
+for the backup schedule expectations, the restore procedure, and the
+recovery-time checklist to work through during an actual incident.
 
 ## Project state
 
