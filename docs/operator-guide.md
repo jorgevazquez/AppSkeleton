@@ -417,6 +417,14 @@ not operator-triggered:
   `database_mysql_audit_log` directly with SQL, and per the point above,
   that table currently only ever contains a given boot's _post-load-pass_
   capability events, not its initial grants.
+- `npm run capability-audit` (feature #118,
+  [`docs/capability-audit.md`](./capability-audit.md)) drives a real HTTP
+  flow against the shipped plugin set and compares each plugin's declared
+  `capabilities.requires` against what it actually obtained per the audit
+  trail described above — surfacing any capability a plugin declares but
+  never uses (over-privileged), which `npm run introspect`'s live-grants
+  view above cannot: `isGranted()` only reports what an operator _could_
+  currently obtain, not what a plugin's own code has actually reached for.
 
 ## See also
 
@@ -430,3 +438,5 @@ not operator-triggered:
   the runtime capability grants described here.
 - [`docs/backup-restore.md`](./backup-restore.md) — database backup/restore
   scripts, configured with the same `DB_*` variables as §1.4.
+- [`docs/capability-audit.md`](./capability-audit.md) — the least-privilege
+  capability audit script referenced in §3.4.
