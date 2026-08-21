@@ -101,7 +101,7 @@ import type { RenderTemplateCapability } from "../html-renderer/index.js";
 import type { RbacCheckCapability } from "../rbac/index.js";
 import { assertWikiAccess } from "./src/access.js";
 import { createAuthorizedWikiStore, type AuthorizedWikiStore } from "./src/authorized-store.js";
-import { diffLines } from "./src/diff.js";
+import { diffLines, renderDiffToHtml } from "./src/diff.js";
 import { renderMarkdownToHtml } from "./src/markdown.js";
 import { createWikiPagesStore, type WikiDbQueryCapability } from "./src/pages.js";
 import { createWikiRevisionsStore } from "./src/revisions.js";
@@ -177,7 +177,7 @@ function obtainWikiStores(capabilities: PluginCapabilityAccess): WikiRequestStor
   return { authorized, dbQuery, rbacCheck };
 }
 
-/** Obtain `render:template` (feature #52), for the `get` route's Markdown-to-HTML rendering (feature #88) — see `obtainWikiStores`'s docs for why this is fetched fresh per request rather than at `onEnable` time. */
+/** Obtain `render:template` (feature #52), for the `get` route's Markdown-to-HTML rendering (feature #88) and the `diff` route's diff-to-HTML rendering (feature #90) — see `obtainWikiStores`'s docs for why this is fetched fresh per request rather than at `onEnable` time. */
 function obtainRenderTemplate(capabilities: PluginCapabilityAccess): RenderTemplateCapability {
   const obtained = capabilities.obtain<RenderTemplateCapability>(RENDER_TEMPLATE_CAPABILITY_ID);
   if (isErr(obtained)) {
@@ -314,8 +314,9 @@ const DIFF_RESPONSE_SCHEMA = {
         required: ["type", "value"],
       },
     },
+    html: { type: "string" },
   },
-  required: ["pageId", "from", "to", "lines"],
+  required: ["pageId", "from", "to", "lines", "html"],
 };
 
 const SEARCH_QUERYSTRING_SCHEMA = {
@@ -554,11 +555,13 @@ function registerWikiRoutes(
   });
 
   // GET /wiki/pages/:id/diff — diff between any two revisions of the same
-  // page (step 1: "diff"). Requires "read", scoped to the page's own
-  // namespace — reuses the already-authorized `listRevisions` (above)
-  // rather than adding a new authorized-store method, since every revision
-  // of a page is already exactly the data a "read" check must have already
-  // authorized to return via `history`.
+  // page (step 1: "diff"), rendered to safe HTML via render:template
+  // (feature #90, step 2 — see `./src/diff.ts`'s `renderDiffToHtml`).
+  // Requires "read", scoped to the page's own namespace — reuses the
+  // already-authorized `listRevisions` (above) rather than adding a new
+  // authorized-store method, since every revision of a page is already
+  // exactly the data a "read" check must have already authorized to return
+  // via `history`.
   registrar.registerRoute({
     method: "GET",
     path: "/wiki/pages/:id/diff",
@@ -587,7 +590,17 @@ function registerWikiRoutes(
       }
 
       const lines = diffLines(from.content, to.content);
-      return { pageId, from: fromId, to: toId, lines };
+
+      const renderTemplate = obtainRenderTemplate(capabilities);
+      const rendered = renderDiffToHtml(lines, renderTemplate.render);
+      if (isErr(rendered)) {
+        throw new RenderError(
+          `Failed to render the diff between revisions ${fromId} and ${toId} of page ${pageId} to HTML: ${rendered.error.message}`,
+          { details: { pageId, from: fromId, to: toId }, cause: rendered.error },
+        );
+      }
+
+      return { pageId, from: fromId, to: toId, lines, html: rendered.value };
     },
   });
 }
