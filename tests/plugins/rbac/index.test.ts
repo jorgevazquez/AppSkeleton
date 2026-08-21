@@ -16,7 +16,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { createCapabilityBroker } from "../../../src/core/broker.js";
-import { loadPlugins, type PluginDefinition } from "../../../src/core/loader.js";
+import { loadPlugins, type PluginDefinition, type PluginModule } from "../../../src/core/loader.js";
 import type { PluginManifest } from "../../../src/core/manifest.js";
 import { isErr, isOk } from "../../../src/core/types.js";
 import * as rbacModule from "../../../src/plugins/rbac/index.js";
@@ -39,7 +39,27 @@ function manifest(
   };
 }
 
-const RBAC_MANIFEST = manifest("rbac", { provides: ["rbac:check"] });
+/**
+ * A minimal `http:route` provider — feature #44 made `rbac`'s own
+ * `onEnable` obtain `http:route` synchronously (to register its admin
+ * routes), so any `loadPlugins()` fixture set that includes the real
+ * `rbac` module now needs *some* provider for it, exactly like every other
+ * `http:route`-consuming plugin's own test fixtures already require (see
+ * `tests/plugins/api-gateway/rbac-protection.integration.test.ts`). This
+ * fixture only records calls — it never spins up a real Fastify instance —
+ * since this file's own tests only care about `rbac:check`'s wiring, not
+ * about the routes feature #44 registers.
+ */
+const HTTP_ROUTE_FIXTURE_MANIFEST = manifest("http-route-fixture", { provides: ["http:route"] });
+function httpRouteFixtureModule(): PluginModule {
+  return { provides: { "http:route": { registerRoute: () => {} } } };
+}
+
+const RBAC_MANIFEST = manifest("rbac", {
+  dependsOn: { "http-route-fixture": "^1.0.0" },
+  provides: ["rbac:check"],
+  requires: ["http:route"],
+});
 
 function getRbacCheck(): RbacCheckCapability {
   return rbacModule.provides?.["rbac:check"] as RbacCheckCapability;
@@ -81,7 +101,10 @@ describe("rbac plugin — lifecycle module (feature #39)", () => {
   });
 
   it("registers rbac:check with the real broker via loadPlugins()", async () => {
-    const definitions: PluginDefinition[] = [{ manifest: RBAC_MANIFEST, module: rbacModule }];
+    const definitions: PluginDefinition[] = [
+      { manifest: HTTP_ROUTE_FIXTURE_MANIFEST, module: httpRouteFixtureModule() },
+      { manifest: RBAC_MANIFEST, module: rbacModule },
+    ];
     const broker = createCapabilityBroker();
 
     const loadResult = await loadPlugins(definitions, broker);
@@ -90,7 +113,9 @@ describe("rbac plugin — lifecycle module (feature #39)", () => {
       return;
     }
     expect(loadResult.value.failed).toEqual([]);
-    expect(loadResult.value.loaded.map((plugin) => plugin.id)).toEqual(["rbac"]);
+    expect(loadResult.value.loaded.map((plugin) => plugin.id).sort()).toEqual(
+      ["http-route-fixture", "rbac"].sort(),
+    );
   });
 
   it("a consumer that declared and was granted rbac:check obtains a working handle from the broker", async () => {

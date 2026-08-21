@@ -568,7 +568,7 @@
       "Write an integration test hitting the routes as an admin (allowed) and as a viewer (403 denied)"
     ],
     "depends_on": [39, 59],
-    "passes": false
+    "passes": true
   },
   {
     "id": 45,

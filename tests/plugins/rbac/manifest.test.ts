@@ -48,4 +48,26 @@ describe("rbac plugin manifest", () => {
       expect(result.value.capabilities.provides).toHaveLength(2);
     }
   });
+
+  it("declares http:route as a required capability (feature #44 — RBAC admin HTTP routes)", async () => {
+    const { entries } = await scanPluginDirectories(PLUGINS_ROOT);
+    const entry = entries.find((candidate) => candidate.name === "rbac");
+    const result = validateManifest(entry?.manifest);
+
+    expect(isOk(result)).toBe(true);
+    if (isOk(result)) {
+      expect(result.value.capabilities.requires).toEqual(["http:route"]);
+    }
+  });
+
+  it("hard-depends on api-gateway (feature #44 needs registerRoute() called synchronously in onEnable, unlike rbac:check/rbac:manage's own lazily-obtained consumers)", async () => {
+    const { entries } = await scanPluginDirectories(PLUGINS_ROOT);
+    const entry = entries.find((candidate) => candidate.name === "rbac");
+    const result = validateManifest(entry?.manifest);
+
+    expect(isOk(result)).toBe(true);
+    if (isOk(result)) {
+      expect(result.value.depends_on).toEqual({ "api-gateway": "^0.1.0" });
+    }
+  });
 });

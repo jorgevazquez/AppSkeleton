@@ -90,7 +90,7 @@ import {
 } from "../../src/plugins/database-mysql/src/query-capability.js";
 import { createInMemoryAuditSink, type InMemoryAuditSink } from "../../src/core/audit.js";
 import { createCapabilityBroker } from "../../src/core/broker.js";
-import { loadPlugins, type PluginDefinition } from "../../src/core/loader.js";
+import { loadPlugins, type PluginDefinition, type PluginModule } from "../../src/core/loader.js";
 import type { PluginManifest } from "../../src/core/manifest.js";
 import { isOk } from "../../src/core/types.js";
 import * as rbacModule from "../../src/plugins/rbac/index.js";
@@ -291,14 +291,33 @@ describe.runIf(mysqlReachable)("rbac — persistent storage integration (feature
     const WRITE_PERMISSION = "feature41-wiki:write";
     const READ_PERMISSION = "feature41-wiki:read";
 
-    function manifest(id: string, provides: string[]): PluginManifest {
+    function manifest(
+      id: string,
+      provides: string[],
+      options: { dependsOn?: Record<string, string>; requires?: string[] } = {},
+    ): PluginManifest {
       return {
         id,
         version: "1.0.0",
-        depends_on: {},
-        capabilities: { provides, requires: [] },
+        depends_on: options.dependsOn ?? {},
+        capabilities: { provides, requires: options.requires ?? [] },
         entry_point: "index.ts",
       };
+    }
+
+    /**
+     * A minimal `http:route` provider — feature #44 made `rbac`'s own
+     * `onEnable` obtain `http:route` synchronously (to register its admin
+     * routes), so `loadRbac()` below now needs *some* provider for it,
+     * exactly like every other `http:route`-consuming plugin's own test
+     * fixtures already require. This fixture only records calls — it never
+     * spins up a real Fastify instance — since this suite's own tests only
+     * care about persistence/policy/audit wiring, not about the routes
+     * feature #44 registers.
+     */
+    const httpRouteFixtureManifest = manifest("http-route-fixture", ["http:route"]);
+    function httpRouteFixtureModule(): PluginModule {
+      return { provides: { "http:route": { registerRoute: () => {} } } };
     }
 
     /** Load the real rbac plugin through the real broker/loader, wired to a fresh audit sink. */
@@ -309,7 +328,14 @@ describe.runIf(mysqlReachable)("rbac — persistent storage integration (feature
     }> {
       const auditSink = createInMemoryAuditSink();
       const definitions: PluginDefinition[] = [
-        { manifest: manifest("rbac", ["rbac:check", "rbac:manage"]), module: rbacModule },
+        { manifest: httpRouteFixtureManifest, module: httpRouteFixtureModule() },
+        {
+          manifest: manifest("rbac", ["rbac:check", "rbac:manage"], {
+            dependsOn: { "http-route-fixture": "^1.0.0" },
+            requires: ["http:route"],
+          }),
+          module: rbacModule,
+        },
       ];
       const broker = createCapabilityBroker();
 

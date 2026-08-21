@@ -27,7 +27,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ValidationError } from "../../../src/core/errors.js";
 import { createCapabilityBroker } from "../../../src/core/broker.js";
-import { loadPlugins, type PluginDefinition } from "../../../src/core/loader.js";
+import { loadPlugins, type PluginDefinition, type PluginModule } from "../../../src/core/loader.js";
 import type { PluginManifest } from "../../../src/core/manifest.js";
 import { isOk } from "../../../src/core/types.js";
 import * as rbacModule from "../../../src/plugins/rbac/index.js";
@@ -199,10 +199,31 @@ describe("rbac plugin onEnable — bootstrap-admin wiring (feature #40)", () => 
     return {
       id: "rbac",
       version: "1.0.0",
-      depends_on: {},
-      capabilities: { provides, requires: [] },
+      depends_on: { "http-route-fixture": "^1.0.0" },
+      capabilities: { provides, requires: ["http:route"] },
       entry_point: "index.ts",
     };
+  }
+
+  /**
+   * A minimal `http:route` provider — feature #44 made `rbac`'s own
+   * `onEnable` obtain `http:route` synchronously (to register its admin
+   * routes), so `loadRbac()` below now needs *some* provider for it,
+   * exactly like every other `http:route`-consuming plugin's own test
+   * fixtures already require. This fixture only records calls — it never
+   * spins up a real Fastify instance — since this file's own tests only
+   * care about the bootstrap-admin wiring, not about the routes feature
+   * #44 registers.
+   */
+  const httpRouteFixtureManifest: PluginManifest = {
+    id: "http-route-fixture",
+    version: "1.0.0",
+    depends_on: {},
+    capabilities: { provides: ["http:route"], requires: [] },
+    entry_point: "index.ts",
+  };
+  function httpRouteFixtureModule(): PluginModule {
+    return { provides: { "http:route": { registerRoute: () => {} } } };
   }
 
   /** Load the real rbac plugin through the real broker/loader — this is what actually triggers `onEnable`, unlike most of this plugin's other tests. */
@@ -211,6 +232,7 @@ describe("rbac plugin onEnable — bootstrap-admin wiring (feature #40)", () => 
     manage: RbacManagementApi;
   }> {
     const definitions: PluginDefinition[] = [
+      { manifest: httpRouteFixtureManifest, module: httpRouteFixtureModule() },
       { manifest: manifest(["rbac:check", "rbac:manage"]), module: rbacModule },
     ];
     const broker = createCapabilityBroker();

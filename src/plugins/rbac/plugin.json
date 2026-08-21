@@ -1,10 +1,10 @@
 {
   "id": "rbac",
   "version": "0.1.0",
-  "depends_on": {},
+  "depends_on": { "api-gateway": "^0.1.0" },
   "capabilities": {
     "provides": ["rbac:check", "rbac:manage"],
-    "requires": []
+    "requires": ["http:route"]
   },
   "entry_point": "index.ts"
 }

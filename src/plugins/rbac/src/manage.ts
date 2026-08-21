@@ -123,6 +123,14 @@ export interface RbacManagementStore {
  * optional or forgettable at a call site.
  */
 export interface RbacManagementApi {
+  /**
+   * List every role currently defined (feature #44, step 1 — "list ...
+   * roles"). Gated by {@link assertCanManage} exactly like every other
+   * operation here: listing roles is itself an `rbac:manage`-scoped
+   * administrative read, not a public lookup — see this module's docs on
+   * self-referential authorization.
+   */
+  listRoles(callerId: string): Promise<Role[]>;
   createRole(callerId: string, input: CreateRoleInput): Promise<Role>;
   updateRole(callerId: string, roleId: string, changes: RoleUpdate): Promise<Role>;
   deleteRole(callerId: string, roleId: string): Promise<void>;
@@ -203,6 +211,11 @@ export function createRbacManagementApi(
   }
 
   return {
+    async listRoles(callerId) {
+      assertCanManage(authorizer, callerId);
+      return store.listRoles();
+    },
+
     async createRole(callerId, input) {
       assertCanManage(authorizer, callerId);
       await assertRoleNameAvailable(input.name);

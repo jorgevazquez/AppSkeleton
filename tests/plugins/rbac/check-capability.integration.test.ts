@@ -48,7 +48,27 @@ function manifest(
   };
 }
 
-const RBAC_MANIFEST = manifest("rbac", { provides: ["rbac:check"] });
+/**
+ * A minimal `http:route` provider — feature #44 made `rbac`'s own
+ * `onEnable` obtain `http:route` synchronously (to register its admin
+ * routes), so any `loadPlugins()` fixture set that includes the real
+ * `rbac` module now needs *some* provider for it, exactly like every other
+ * `http:route`-consuming plugin's own test fixtures already require (see
+ * `tests/plugins/api-gateway/rbac-protection.integration.test.ts`). This
+ * fixture only records calls — it never spins up a real Fastify instance —
+ * since this file's own tests only care about `rbac:check`'s wiring, not
+ * about the routes feature #44 registers.
+ */
+const HTTP_ROUTE_FIXTURE_MANIFEST = manifest("http-route-fixture", { provides: ["http:route"] });
+function httpRouteFixtureModule(): PluginModule {
+  return { provides: { "http:route": { registerRoute: () => {} } } };
+}
+
+const RBAC_MANIFEST = manifest("rbac", {
+  dependsOn: { "http-route-fixture": "^1.0.0" },
+  provides: ["rbac:check"],
+  requires: ["http:route"],
+});
 
 describe("rbac:check — integration (feature #39)", () => {
   it("a fixture plugin obtains rbac:check, calls it, and gets a real allow/deny decision backed by rbac's own policy data", async () => {
@@ -81,6 +101,7 @@ describe("rbac:check — integration (feature #39)", () => {
     };
 
     const definitions: PluginDefinition[] = [
+      { manifest: HTTP_ROUTE_FIXTURE_MANIFEST, module: httpRouteFixtureModule() },
       { manifest: RBAC_MANIFEST, module: rbacModule },
       { manifest: auditedActionManifest, module: auditedActionModule },
     ];
@@ -94,6 +115,7 @@ describe("rbac:check — integration (feature #39)", () => {
     expect(loadResult.value.failed).toEqual([]);
     expect(loadResult.value.loaded.map((plugin) => plugin.id).sort()).toEqual([
       "audited-action",
+      "http-route-fixture",
       "rbac",
     ]);
 
@@ -126,6 +148,7 @@ describe("rbac:check — integration (feature #39)", () => {
     const unrelatedModule: PluginModule = {};
 
     const definitions: PluginDefinition[] = [
+      { manifest: HTTP_ROUTE_FIXTURE_MANIFEST, module: httpRouteFixtureModule() },
       { manifest: RBAC_MANIFEST, module: rbacModule },
       { manifest: undeclaredManifest, module: undeclaredModule },
       { manifest: unrelatedManifest, module: unrelatedModule },
@@ -139,6 +162,7 @@ describe("rbac:check — integration (feature #39)", () => {
     }
 
     expect(loadResult.value.loaded.map((plugin) => plugin.id).sort()).toEqual([
+      "http-route-fixture",
       "rbac",
       "unrelated",
     ]);
