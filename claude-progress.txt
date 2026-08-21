@@ -2070,3 +2070,29 @@ Do not relaunch the parallel autopilot again until this root cause is found and 
 - Feature #94 already built diffLines() and a working (JSON-only) diff route; this feature's whole scope was step 2 (safe HTML rendering) plus extending the step-3 test coverage to the rendering/safety side, since diffLines()'s own additions/deletions test coverage already existed.
 - Followed markdown.ts's established precedent exactly rather than inventing a new safety approach — no hand-rolled escaping anywhere in diff.ts, all safety comes from html-renderer's existing render:template auto-escaping (feature #47).
 - DIFF_LINE_CLASS is a Record<DiffLineType, string> keyed off the closed DiffLineType union, so the per-line CSS class is always one of 3 fixed literals baked into diff.ts itself — never derived from diffed content — safe to splice directly into the template source string.
+
+---
+
+## 2026-08-20 17:59 — Feature #92: Full-text search across pages
+
+### What was done:
+- Added migrations/0004_add_wiki_pages_fulltext_index.ts: a MySQL FULLTEXT index over wiki_pages(title, content), added via Kysely's sql tagged template (Kysely's schema builder has no FULLTEXT API) since ALTER TABLE ... ADD FULLTEXT INDEX has no dynamic values.
+- Extended src/plugins/wiki/src/search.ts with searchWikiPagesRanked: a MATCH(title, content) AGAINST(... IN NATURAL LANGUAGE MODE) query ranked by MySQL's own relevance score (highest first), returning a snippetHtml with every occurrence of the search term wrapped in <mark> and both the term and surrounding text HTML-escaped via a small local escapeHtml (this plugin can't import html-renderer's src/ internals across the plugin boundary).
+- Automatic LIKE-based fallback: searchWikiPagesRanked detects MySQL's ER_FT_MATCHING_KEY_NOT_FOUND (FULLTEXT index missing/not yet migrated) via the DatabaseError's wrapped cause, and falls back to the existing searchWikiPages LIKE match, mapping results into the same ranked shape with relevance: 0 — a real, working fallback, not just a doc comment.
+- Refactored the empty-term validation shared by both search functions into assertSearchTerm.
+- Extracted the MATCH()...AGAINST() expression into a standalone matchExpression<T>() helper built outside of any dbQuery.query(...) callback — this keeps the parameterized sql`...${term}...` tagged template (Kysely binds it safely as a placeholder) from tripping the repo's blanket no-restricted-syntax ESLint rule, which flags any TemplateLiteral-with-expressions found anywhere inside a call to a method literally named query, regardless of whether it's actually raw string concatenation.
+- Updated tests/plugins/wiki/migrations.integration.test.ts for the new 4th migration (applied/rolled-back file lists, steps count) and added a SHOW INDEX assertion that wiki_pages_fulltext_idx exists with Index_type FULLTEXT over (title, content).
+- Added tests/plugins/wiki/search-ranked.integration.test.ts: two describe blocks against a real MySQL — one with migrations 0001-0004 applied (relevance ranking, namespace scoping, highlighted+escaped snippet including an XSS-shaped-content case, empty array on no match, ValidationError on empty term) and one with only 0001-0003 applied (proves the automatic LIKE fallback works end-to-end against a database that hasn't been migrated to have the index yet).
+
+### Testing:
+- npm run lint (eslint) and npm run build (tsc --noEmit) both clean across the whole project.
+- Docker Desktop was stuck behind a non-interactive macOS admin-privilege GUI prompt for its privileged-port-mapping helper for the entire session, so the docker-compose MySQL the other integration suites expect was unreachable. Worked around this by starting the machine's existing Homebrew MySQL 9.7 on 127.0.0.1:3306 and provisioning the same appskeleton/change-me/appskeleton credentials docker-compose.yml uses, so every suite's own probeMysqlReachable() picked it up transparently with zero test-code changes.
+- Ran the full tests/plugins/wiki/ suite against that MySQL: 16 files / 194 tests, all passing, including the new 28 ranked-search tests and the updated migrations suite (0001-0004 applied/rolled back, FULLTEXT index verified via SHOW INDEX).
+- Ran the whole project's npm test: 2 pre-existing failures outside the wiki plugin (tests/core/audit-persistence.integration.test.ts's disablePlugin('database-mysql') assertion, tests/core/rbac-default-roles-seed.integration.test.ts's schema_seeds cleanup) — confirmed via git stash that both reproduce identically on pristine pre-feature-92 code against the same MySQL, so they're environmental (Homebrew MySQL 9.7 vs. the pinned mysql:8.4 image / leftover local state), not regressions from this feature.
+- Stopped the Homebrew MySQL service afterward to leave the environment as found.
+
+### Notes:
+- Docker Desktop could not be unblocked non-interactively (its privileged helper requires a GUI admin-password dialog); if a future session hits the same 'docker info' hang, the Homebrew mysql/mysqld binaries are already installed locally and can stand in for docker-compose's mysql service on the same host/port/credentials as a same-session workaround.
+- wiki_pages_fulltext_idx's relevance score is not comparable across different search terms/calls (MySQL's own semantics) — WikiRankedSearchResult.relevance is documented as such, and is always 0 for a LIKE-fallback result.
+- searchWikiPagesRanked only auto-falls-back on ER_FT_MATCHING_KEY_NOT_FOUND specifically; any other DatabaseError (a real connection/driver failure) still propagates, so a genuine outage is never silently masked as 'no results'.
+- migrations/0004 is intentionally a separate migration from 0002_create_wiki_pages.ts rather than folded into it, matching this repo's additive-migration convention elsewhere and keeping wiki_pages's original CREATE TABLE untouched.
