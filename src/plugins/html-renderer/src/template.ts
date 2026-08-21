@@ -1139,13 +1139,24 @@ export interface CompiledTemplate {
  * `{{{raw ...}}}` node in `nodes`. Callers are responsible for checking
  * {@link requireRawAudit} against `nodes` first — `compileTemplate` and
  * `compileWithLayout` both do this before calling here.
+ *
+ * `resolvePartial` (feature #95 — composing layouts with partials) is
+ * passed straight through to every compiled `{{> ...}}` node in `nodes`,
+ * exactly like `compilePartialBody` already does for a partial's own body.
+ * `undefined` (the default — `compileTemplate` never passes one) means any
+ * `{{> ...}}` tag reachable in `nodes` throws a `RenderError` at render
+ * time, same as before this parameter existed. `layout.ts`'s
+ * `compileWithLayout` is the only caller that ever supplies one, when its
+ * own optional `partials` argument was given — see that module's doc
+ * comment.
  */
 export function compileResolvedNodes(
   nodes: readonly TemplateNode[],
   audit?: RawOutputAuditContext,
+  resolvePartial?: PartialResolver,
 ): CompiledTemplate {
   const contexts = annotateEscapeContexts(nodes);
-  const compiled = compileNodes(nodes, contexts, undefined, audit);
+  const compiled = compileNodes(nodes, contexts, resolvePartial, audit);
   return {
     render(context: TemplateContext = {}): string {
       const out: string[] = [];

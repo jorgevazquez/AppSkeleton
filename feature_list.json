@@ -1220,7 +1220,7 @@
       "Write a test rendering the home page and asserting key navigation elements are present"
     ],
     "depends_on": [91, 52],
-    "passes": false
+    "passes": true
   },
   {
     "id": 96,

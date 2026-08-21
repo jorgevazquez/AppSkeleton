@@ -74,62 +74,25 @@ function resolvePartialSource(partials: PartialSource, name: string): string | u
 }
 
 /**
- * Compile `source` — a template that may contain `{{> name ...}}` tags —
- * resolving each referenced partial's source text via `partials` (a
+ * Build a lazy, cached {@link PartialResolver} over `partials` (a
  * `{ name: source }` map, or a `name => source | undefined` lookup
- * function for callers with their own template registry/loader). See the
- * module doc comment for the resolution algorithm and error-reporting
- * tradeoffs. Returns a {@link ValidationError} (never throws) for a
- * malformed `source` itself; the returned `CompiledTemplate.render()` may
- * *throw* a {@link RenderError} for a problem only discoverable at render
- * time (an unknown partial name, a referenced partial's own parse error,
- * or exceeding the max recursion depth) — see the module doc's "Errors"
- * section for why that's a throw and not a `Result`.
- *
- * Rejects `source` containing an `{{extends}}` tag: this function doesn't
- * resolve layouts, only partials — use layout.ts's `compileWithLayout` for
- * that (layouts and partials are not currently composable in one call).
- *
- * `options.audit` (feature #50) is required if `source` itself contains a
- * `{{{raw ...}}}` tag. A referenced *partial*'s own body is checked
- * separately, lazily, the first time that partial is actually resolved (see
- * `resolvePartial` below) — since which partials get referenced isn't fully
- * known until render time, same as everything else about partial
- * resolution (see the module doc's "Why this isn't 'resolve everything up
- * front'" section). A partial containing `{{{raw ...}}}` when no audit
- * context was supplied surfaces the same way an unparseable partial body
- * does: a {@link RenderError} thrown from `render()`, not a `Result`.
+ * function). Shared by {@link compileWithPartials} below and, since feature
+ * #95, `layout.ts`'s `compileWithLayout` (when its own optional `partials`
+ * argument is supplied) — factored out so both call sites get identical
+ * lazy-resolution/caching/error-reporting semantics rather than two
+ * hand-maintained copies. See the module doc's "Why this isn't 'resolve
+ * everything up front'" and "Errors" sections for the semantics this
+ * implements: resolution happens per name, the first time a `{{> name}}`
+ * tag actually runs at render time (never eagerly, so a self-/mutually-
+ * recursive partial compiles fine), and an unknown name / a referenced
+ * partial's own parse or audit failure surfaces as a thrown
+ * {@link RenderError} from wherever the resulting `CompiledTemplate`/
+ * `CompiledPartialBody` is eventually rendered — never a `Result`.
  */
-export function compileWithPartials(
-  source: string,
+export function createPartialResolver(
   partials: PartialSource,
   options?: CompileOptions,
-): Result<CompiledTemplate, ValidationError> {
-  const rootResult = parseTemplate(source);
-  if (!rootResult.ok) {
-    return rootResult;
-  }
-
-  let hasExtends = false;
-  walkTemplateNodes(rootResult.value, (node) => {
-    if (node.kind === "extends") {
-      hasExtends = true;
-    }
-  });
-  if (hasExtends) {
-    return err(
-      new ValidationError(
-        "Template contains an {{extends}} tag; compileWithPartials does not resolve layouts — " +
-          "use compileWithLayout (layout.ts) instead.",
-      ),
-    );
-  }
-
-  const rawAuditResult = requireRawAudit(rootResult.value, options?.audit);
-  if (!rawAuditResult.ok) {
-    return rawAuditResult;
-  }
-
+): PartialResolver {
   // Populated lazily, the first time each name is actually resolved at render time — never
   // eagerly — so a partial that (directly or transitively) includes itself compiles and renders
   // fine, right up until MAX_PARTIAL_DEPTH (enforced inside template.ts's "partial" compiler
@@ -177,6 +140,70 @@ export function compileWithPartials(
     return compiledBody;
   };
 
+  return resolvePartial;
+}
+
+/**
+ * Compile `source` — a template that may contain `{{> name ...}}` tags —
+ * resolving each referenced partial's source text via `partials` (a
+ * `{ name: source }` map, or a `name => source | undefined` lookup
+ * function for callers with their own template registry/loader). See the
+ * module doc comment for the resolution algorithm and error-reporting
+ * tradeoffs. Returns a {@link ValidationError} (never throws) for a
+ * malformed `source` itself; the returned `CompiledTemplate.render()` may
+ * *throw* a {@link RenderError} for a problem only discoverable at render
+ * time (an unknown partial name, a referenced partial's own parse error,
+ * or exceeding the max recursion depth) — see the module doc's "Errors"
+ * section for why that's a throw and not a `Result`.
+ *
+ * Rejects `source` containing an `{{extends}}` tag: this function doesn't
+ * resolve layouts, only partials — use layout.ts's `compileWithLayout`
+ * for that. Since feature #95, `compileWithLayout` accepts an optional
+ * `partials` argument of its own, so a template needing *both* a layout
+ * and partials should go through that function instead of this one.
+ *
+ * `options.audit` (feature #50) is required if `source` itself contains a
+ * `{{{raw ...}}}` tag. A referenced *partial*'s own body is checked
+ * separately, lazily, the first time that partial is actually resolved (see
+ * `createPartialResolver` above) — since which partials get referenced
+ * isn't fully known until render time, same as everything else about
+ * partial resolution (see the module doc's "Why this isn't 'resolve
+ * everything up front'" section). A partial containing `{{{raw ...}}}`
+ * when no audit context was supplied surfaces the same way an unparseable
+ * partial body does: a {@link RenderError} thrown from `render()`, not a
+ * `Result`.
+ */
+export function compileWithPartials(
+  source: string,
+  partials: PartialSource,
+  options?: CompileOptions,
+): Result<CompiledTemplate, ValidationError> {
+  const rootResult = parseTemplate(source);
+  if (!rootResult.ok) {
+    return rootResult;
+  }
+
+  let hasExtends = false;
+  walkTemplateNodes(rootResult.value, (node) => {
+    if (node.kind === "extends") {
+      hasExtends = true;
+    }
+  });
+  if (hasExtends) {
+    return err(
+      new ValidationError(
+        "Template contains an {{extends}} tag; compileWithPartials does not resolve layouts — " +
+          "use compileWithLayout (layout.ts) instead.",
+      ),
+    );
+  }
+
+  const rawAuditResult = requireRawAudit(rootResult.value, options?.audit);
+  if (!rawAuditResult.ok) {
+    return rawAuditResult;
+  }
+
+  const resolvePartial = createPartialResolver(partials, options);
   const compiled = compilePartialBody(rootResult.value, resolvePartial, options?.audit);
   return ok({
     render(context: TemplateContext = {}): string {
