@@ -1451,7 +1451,7 @@
       "Perform a dry-run restore into a scratch database and record the steps that actually worked"
     ],
     "depends_on": [28],
-    "passes": false
+    "passes": true
   },
   {
     "id": 114,
