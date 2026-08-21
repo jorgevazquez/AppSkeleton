@@ -53,6 +53,7 @@
  * never revokes another grant (see that module's precedence rules 1–2) —
  * so "override" here can only ever mean "grant more," never "take away."
  */
+import type { AuditSink } from "../../../core/audit.js";
 import { AuthenticationError, AuthorizationError } from "../../../core/errors.js";
 import type { RbacCheckCapability } from "../../rbac/index.js";
 
@@ -145,5 +146,113 @@ export function assertWikiAccess(
     throw new AuthorizationError(
       `User "${userId}" does not hold "${action}" permission for the wiki${namespaceSuffix}.`,
     );
+  }
+}
+
+/**
+ * Wiki-level audit trail integration (feature #98 — "Wiki-level audit log
+ * surfaced via the kernel audit trail"). This module's `assertWikiAccess`
+ * above already goes through `rbac:check`'s own audit logging (feature
+ * #38) for the raw allow/deny decision, but that entry's `target` is only
+ * ever the resource string checked (`"wiki"` or `"wiki-<namespaceId>"`) —
+ * it never carries a *page's* identity, since `rbac:check` has no concept
+ * of a wiki page. This feature's own step 1 ("actor and page identity")
+ * needs the latter, so `authorized-store.ts`/`index.ts` (the two modules
+ * that actually know which page an operation is about) record their own,
+ * additional wiki-specific entries via {@link recordWikiAudit} /
+ * {@link assertWikiAccessAudited} below — a second, complementary trail,
+ * not a replacement for `rbac:check`'s own.
+ */
+
+/** One page-identity target string, in a single consistent format every wiki audit entry (`authorized-store.ts`, `index.ts`) uses.
+ *
+ *  - Both `id` and `namespaceId`/`slug` known: `"wiki:page:<id>"` — the
+ *    stable surrogate key is always preferred once it exists.
+ *  - Only `namespaceId`/`slug` known (e.g. a `createPage` permission check,
+ *    before the row — and its `id` — exists yet): `"wiki:page:<namespaceId>/<slug>"`.
+ *  - Only `namespaceId` known (e.g. `listPages`/`search` with no single
+ *    page in view): `"wiki:namespace:<namespaceId>"`.
+ *  - Nothing known at all (e.g. `listPages()` across every namespace):
+ *    the bare global resource, `"wiki"`.
+ */
+export function wikiAuditTarget(id?: number, namespaceId?: string, slug?: string): string {
+  if (id !== undefined) {
+    return `wiki:page:${id}`;
+  }
+  if (namespaceId !== undefined && slug !== undefined) {
+    return `wiki:page:${namespaceId}/${slug}`;
+  }
+  if (namespaceId !== undefined) {
+    return `wiki:namespace:${namespaceId}`;
+  }
+  return WIKI_RESOURCE;
+}
+
+/** Shape of one entry {@link recordWikiAudit} accepts — mirrors `core/audit.ts`'s `AuditEvent`, minus `timestamp` (stamped here, at record time, matching `rbac/index.ts`'s own `recordCheckDecision` precedent). */
+export interface WikiAuditEventInput {
+  readonly actor: string;
+  readonly action: string;
+  readonly target: string;
+  readonly outcome: string;
+  readonly details?: Record<string, unknown>;
+}
+
+/**
+ * Record one wiki-specific audit entry to `auditSink`, if one is wired —
+ * a no-op otherwise (e.g. a unit test that builds an `AuthorizedWikiStore`
+ * with no sink at all), exactly like `rbac/index.ts`'s own
+ * `recordCheckDecision`. Every wiki mutation (`create`/`update`/`delete`)
+ * and every permission denial is recorded in full — unlike `rbac:check`'s
+ * own allow-sampling, there is no high-frequency "allowed" event to worry
+ * about bounding here, since successful *reads* are deliberately never
+ * recorded (see this feature's own step 1 wording — "create/update/delete/
+ * permission-denied", not "every read").
+ */
+export function recordWikiAudit(
+  auditSink: AuditSink | undefined,
+  event: WikiAuditEventInput,
+): void {
+  if (!auditSink) {
+    return;
+  }
+  auditSink.record({ ...event, timestamp: Date.now() });
+}
+
+/**
+ * {@link assertWikiAccess}, plus recording a `"denied"` {@link
+ * recordWikiAudit} entry (actor + page identity, per this feature's step 1)
+ * on the way out whenever it throws — a 401 ({@link AuthenticationError},
+ * no resolved caller identity at all) or a 403 ({@link AuthorizationError},
+ * resolved-but-unauthorized) are both "permission-denied" for this
+ * purpose. Recording happens *before* the error propagates, so a denial is
+ * captured even though the caller never gets a return value back from this
+ * assertion function. On success (no throw), nothing is recorded here —
+ * successful reads stay silent (see {@link recordWikiAudit}'s docs); a
+ * successful mutation's own `"created"`/`"updated"`/`"deleted"` entry is
+ * recorded separately, by the caller, only after the underlying store call
+ * itself has actually succeeded.
+ */
+export function assertWikiAccessAudited(
+  auditSink: AuditSink | undefined,
+  rbacCheck: RbacCheckCapability,
+  userId: string | undefined,
+  action: WikiAction,
+  target: string,
+  namespaceId?: string,
+): asserts userId is string {
+  try {
+    assertWikiAccess(rbacCheck, userId, action, namespaceId);
+  } catch (error) {
+    recordWikiAudit(auditSink, {
+      actor: userId ?? "anonymous",
+      action: `wiki:${action}`,
+      target,
+      outcome: "denied",
+      details: {
+        kind: "wiki:permission-denied",
+        ...(namespaceId !== undefined ? { namespaceId } : {}),
+      },
+    });
+    throw error;
   }
 }
