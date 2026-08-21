@@ -1514,7 +1514,7 @@
       "Run it against the full shipped plugin set and resolve any findings"
     ],
     "depends_on": [7, 77],
-    "passes": false
+    "passes": true
   },
   {
     "id": 119,
