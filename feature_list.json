@@ -1374,7 +1374,7 @@
       "Document image build/run instructions in README"
     ],
     "depends_on": [12, 58],
-    "passes": false
+    "passes": true
   },
   {
     "id": 108,
