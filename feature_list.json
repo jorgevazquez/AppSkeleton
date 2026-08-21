@@ -1233,7 +1233,7 @@
       "Write a test asserting a submission without a valid CSRF token is rejected end-to-end through the real UI flow"
     ],
     "depends_on": [94, 64],
-    "passes": false
+    "passes": true
   },
   {
     "id": 97,

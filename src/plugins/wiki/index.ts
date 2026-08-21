@@ -103,6 +103,11 @@ import { assertWikiAccess } from "./src/access.js";
 import { createAuthorizedWikiStore, type AuthorizedWikiStore } from "./src/authorized-store.js";
 import { diffLines, renderDiffToHtml } from "./src/diff.js";
 import { renderMarkdownToHtml } from "./src/markdown.js";
+import {
+  CREATE_PAGE_FORM_ACTION,
+  editPageFormAction,
+  renderPageFormHtml,
+} from "./src/page-form.js";
 import { createWikiPagesStore, type WikiDbQueryCapability } from "./src/pages.js";
 import { createWikiRevisionsStore } from "./src/revisions.js";
 import { searchWikiPages } from "./src/search.js";
@@ -357,6 +362,19 @@ const DELETE_RESPONSE_SCHEMA = {
   required: ["id", "deleted"],
 };
 
+/** Response schema for the two HTML form routes below (feature #96) — a plain string, matching api-gateway's own `GET /api/v1/docs` HTML route precedent (`../api-gateway/index.ts`'s `registerOpenApiDocumentationRoutes`). */
+const HTML_PAGE_RESPONSE_SCHEMA = {
+  type: "string",
+  description: "A server-rendered HTML page.",
+};
+
+/** An explicit "no query input accepted" schema, reused by both HTML form routes below — same shape as `../api-gateway/index.ts`'s `NO_INPUT_QUERYSTRING_SCHEMA`. */
+const NO_INPUT_QUERYSTRING_SCHEMA = {
+  type: "object",
+  properties: {},
+  additionalProperties: false,
+};
+
 // ---------------------------------------------------------------------------
 // Route registration (step 1 + step 2)
 // ---------------------------------------------------------------------------
@@ -601,6 +619,96 @@ function registerWikiRoutes(
       }
 
       return { pageId, from: fromId, to: toId, lines, html: rendered.value };
+    },
+  });
+
+  // GET /wiki/pages/new — the create-page form (feature #96, step 1). No
+  // page exists yet to authorize against, so this route itself gates on
+  // nothing beyond having a session cookie parsed (or not) the same way
+  // every other route does — the *submission* this form posts to is the
+  // already-authorized POST /wiki/pages route above, which is what
+  // actually enforces "write" access for whichever namespace the user
+  // types in. A user who can't write anywhere simply gets an
+  // AuthorizationError back from that route, inline, exactly like any
+  // other validation failure (step 2).
+  registrar.registerRoute({
+    method: "GET",
+    path: "/wiki/pages/new",
+    schema: {
+      querystring: NO_INPUT_QUERYSTRING_SCHEMA,
+      response: { 200: HTML_PAGE_RESPONSE_SCHEMA },
+    },
+    handler: async (_request, reply) => {
+      const renderTemplate = obtainRenderTemplate(capabilities);
+      const rendered = renderPageFormHtml(
+        {
+          isEdit: false,
+          namespaceId: "",
+          slug: "",
+          title: "",
+          content: "",
+          actionPath: CREATE_PAGE_FORM_ACTION,
+          actionMethod: "POST",
+        },
+        renderTemplate.render,
+      );
+      if (isErr(rendered)) {
+        throw new RenderError(`Failed to render the create-page form: ${rendered.error.message}`, {
+          cause: rendered.error,
+        });
+      }
+      reply.type("text/html; charset=utf-8");
+      return rendered.value;
+    },
+  });
+
+  // GET /wiki/pages/:id/edit — the edit-page form (feature #96, step 1),
+  // prefilled with the page's current title/content. Requires "read",
+  // scoped to the page's own namespace — the same authorized lookup the
+  // plain `get` route above already performs, so an unauthorized caller
+  // gets the same 401/403 here as they would hitting the JSON API
+  // directly, never a peek at content they can't otherwise read.
+  registrar.registerRoute({
+    method: "GET",
+    path: "/wiki/pages/:id/edit",
+    schema: {
+      params: PAGE_ID_PARAMS_SCHEMA,
+      querystring: NO_INPUT_QUERYSTRING_SCHEMA,
+      response: { 200: HTML_PAGE_RESPONSE_SCHEMA },
+    },
+    handler: async (request, reply) => {
+      const userId = resolveUserId(request);
+      const params = request.params as { id: string };
+      const id = parsePositiveIntegerId(params.id, "page id");
+
+      const { authorized } = obtainWikiStores(capabilities);
+      const page = await authorized.getPageById(userId, id);
+      if (!page) {
+        throw new NotFoundError(`Page with id ${id} does not exist.`, { details: { id } });
+      }
+
+      const renderTemplate = obtainRenderTemplate(capabilities);
+      const rendered = renderPageFormHtml(
+        {
+          isEdit: true,
+          pageId: page.id,
+          namespaceId: page.namespaceId,
+          slug: page.slug,
+          title: page.title,
+          content: page.content,
+          actionPath: editPageFormAction(page.id),
+          actionMethod: "PATCH",
+        },
+        renderTemplate.render,
+      );
+      if (isErr(rendered)) {
+        throw new RenderError(
+          `Failed to render the edit-page form for page ${id}: ${rendered.error.message}`,
+          { details: { id }, cause: rendered.error },
+        );
+      }
+      reply.type("text/html; charset=utf-8");
+      return rendered.value;
     },
   });
 }
