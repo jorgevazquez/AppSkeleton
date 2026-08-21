@@ -14,9 +14,13 @@
  * That's intentional: proving `wiki_pages`/`wiki_revisions`/
  * `wiki_namespaces` and their indexes are exactly what step 1/2 describe is
  * the whole point of this feature, so a disposable fixture schema wouldn't
- * test anything.
+ * test anything. Also covers `migrations/0004_add_wiki_pages_fulltext_index.ts`
+ * (feature #92 step 1's own `FULLTEXT` index), applied here through the
+ * same `listMigrationFiles(WIKI_MIGRATIONS_DIR)` file list as the other
+ * three, with no changes to this suite's own structure needed.
  *
- * `afterAll` fully rolls the three migrations back (`runMigrationsDown`,
+ * `afterAll` fully rolls every migration this suite applied back
+ * (`runMigrationsDown`,
  * `steps: <all of them>`), the same way `migrator.integration.test.ts` and
  * `database-mysql/integration.test.ts` always leave `schema_migrations`
  * exactly as they found it: every plugin's migrations share one *global*
@@ -111,6 +115,7 @@ interface ShowIndexRow extends mysql.RowDataPacket {
   Non_unique: number;
   Column_name: string;
   Seq_in_index: number;
+  Index_type: string;
 }
 
 async function showIndex(pool: mysql.Pool, tableName: string): Promise<ShowIndexRow[]> {
@@ -139,6 +144,7 @@ describe.runIf(mysqlReachable)("wiki migrations — schema, indexes, and constra
       "0001_create_wiki_namespaces.ts",
       "0002_create_wiki_pages.ts",
       "0003_create_wiki_revisions.ts",
+      "0004_add_wiki_pages_fulltext_index.ts",
     ]);
   });
 
@@ -147,8 +153,9 @@ describe.runIf(mysqlReachable)("wiki migrations — schema, indexes, and constra
     // this file's top doc comment for why leaving them applied would risk
     // breaking a later suite (or a second `npm test` run) that shares the
     // same global `schema_migrations` tracking table.
-    const result = await runMigrationsDown(db, files(), { pluginId: PLUGIN_ID, steps: 3 });
+    const result = await runMigrationsDown(db, files(), { pluginId: PLUGIN_ID, steps: 4 });
     expect(result.rolledBack).toEqual([
+      "0004_add_wiki_pages_fulltext_index.ts",
       "0003_create_wiki_revisions.ts",
       "0002_create_wiki_pages.ts",
       "0001_create_wiki_namespaces.ts",
@@ -178,6 +185,16 @@ describe.runIf(mysqlReachable)("wiki migrations — schema, indexes, and constra
 
     expect(uniqueIdxRows.map((row) => row.Column_name)).toEqual(["namespace_id", "slug"]);
     expect(uniqueIdxRows.every((row) => row.Non_unique === 0)).toBe(true);
+  });
+
+  it("has a FULLTEXT index on wiki_pages(title, content) for feature #92's ranked search", async () => {
+    const rows = await showIndex(pool, "wiki_pages");
+    const fulltextIdxRows = rows
+      .filter((row) => row.Key_name === "wiki_pages_fulltext_idx")
+      .sort((a, b) => a.Seq_in_index - b.Seq_in_index);
+
+    expect(fulltextIdxRows.map((row) => row.Column_name)).toEqual(["title", "content"]);
+    expect(fulltextIdxRows.every((row) => row.Index_type === "FULLTEXT")).toBe(true);
   });
 
   it("has a lookup index on wiki_revisions(page_id) for revision-by-page queries", async () => {
