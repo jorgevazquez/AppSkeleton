@@ -26,6 +26,7 @@
     "introspect": "tsx src/cli/introspect.ts",
     "generate:manifest-schema": "tsx src/plugins/plugin-builder/src/generate-manifest-json-schema.ts",
     "generate:capability-index": "tsx src/plugins/plugin-builder/src/generate-capability-index.ts",
+    "load-test": "tsx scripts/load-test.ts",
     "prepare": "husky"
   },
   "lint-staged": {
@@ -59,6 +60,7 @@
     "@types/semver": "^7.8.0",
     "@typescript-eslint/eslint-plugin": "^8.7.0",
     "@typescript-eslint/parser": "^8.7.0",
+    "autocannon": "^8.0.0",
     "axe-core": "^4.13.0",
     "eslint": "^9.11.0",
     "husky": "^9.1.7",
