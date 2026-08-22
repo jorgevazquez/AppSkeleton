@@ -29,6 +29,7 @@
     "load-test": "tsx scripts/load-test.ts",
     "kernel-benchmark": "tsx scripts/kernel-dispatch-benchmark.ts",
     "capability-audit": "tsx scripts/capability-audit.ts",
+    "smoke-test": "tsx scripts/smoke-test.ts",
     "prepare": "husky"
   },
   "lint-staged": {

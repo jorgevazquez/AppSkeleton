@@ -18,6 +18,42 @@ npm run dev                 # start the dev server
 npm test                    # run the test suite
 ```
 
+## Final verification (canonical smoke test)
+
+The exact sequence below is this repo's own canonical, fresh-clone-through-
+running-wiki verification procedure — the same one a release, a new
+contributor's first setup, or `docs/disaster-recovery.md`'s "smoke-test
+before resuming writes" step should run:
+
+```bash
+./init.sh          # fresh checkout: installs deps, starts MySQL via Docker, migrates
+npm test            # unit + integration suite (real MySQL, real plugins — see above)
+npm run smoke-test  # boots the real server and proves the wiki works end-to-end
+```
+
+`npm run smoke-test` (`scripts/smoke-test.ts`) is the one thing in this repo
+that exercises the _entire_ real boot path the way an operator actually
+would — `bootstrapKernel()`'s real, dynamically-discovered `src/plugins/*`
+tree, not the hand-wired plugin subsets `load-test.ts`/`capability-audit.ts`
+use for their own narrower purposes — over a real TCP socket, not
+`app.inject()`. It:
+
+1. Boots the server for real and fetches the wiki's own "Home" starter page
+   (creating it first, over real HTTP, if this is a genuinely fresh
+   database) — proving real HTTP → routing → RBAC → the wiki plugin →
+   MySQL → Markdown rendering all work together end-to-end.
+2. Confirms every shipped plugin — `rbac`, `database-mysql`,
+   `html-renderer`, `api-gateway`, `plugin-builder`, and `wiki` — reports
+   `"loaded"` (and, where a health check exists, `"healthy"`) in
+   `kernel.introspectWithHealth()`, printing the same human-readable report
+   `npm run introspect` does.
+3. Shuts the server back down gracefully and exits non-zero, with an
+   itemized list of what went wrong, if any of the above didn't hold.
+
+Requires a reachable, migrated MySQL — the same `./init.sh` (or
+`docker compose up -d mysql`) prerequisite every `*.integration.test.ts`
+suite already has.
+
 ## Production Docker image
 
 `Dockerfile` builds a minimal, production-only image: a `build` stage
